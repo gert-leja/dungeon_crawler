@@ -1,0 +1,6370 @@
+import pygame
+import math
+import random
+import sys
+import json
+import os
+
+try:
+    import cv2
+    import numpy as np
+    _CV2_AVAILABLE = True
+except ImportError:
+    _CV2_AVAILABLE = False
+
+pygame.init()
+pygame.mixer.init()
+
+# ── Asset path helper ─────────────────────────────────────────────────────────
+#
+# When running as a plain .py script:
+#   ASSET_DIR  = folder containing dungeon_crawler.py   (read-only assets live here)
+#   DATA_DIR   = same folder                             (leaderboard.json goes here)
+#
+# When frozen by PyInstaller (--onefile or --onedir):
+#   sys._MEIPASS = temp unpacked bundle  → read-only assets live here
+#   sys.executable dir                   → next to the .exe, writable → leaderboard goes here
+
+def _get_asset_dir():
+    """Directory that holds the bundled read-only assets (sounds, images, video)."""
+    if getattr(sys, "frozen", False):
+        # PyInstaller unpacks assets into sys._MEIPASS
+        return sys._MEIPASS
+    return os.path.dirname(os.path.abspath(__file__))
+
+def _get_data_dir():
+    """Writable directory for user data (leaderboard.json) that persists across runs."""
+    if getattr(sys, "frozen", False):
+        # Place next to the .exe so it survives between launches
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
+
+ASSET_DIR = _get_asset_dir()
+DATA_DIR  = _get_data_dir()
+
+def asset(filename):
+    """Return full path to a read-only asset inside the assets/ folder."""
+    return os.path.join(ASSET_DIR, "assets", filename)
+
+# ── Music manager ─────────────────────────────────────────────────────────────
+
+class Music:
+    """
+    Centralised music controller. All tracks live in the same folder as the
+    script. Missing files are silently skipped so the game still runs without
+    any audio assets.
+
+    Expected filenames (OGG recommended, MP3/WAV also accepted):
+        menu.ogg            – main menu / username screen
+        shop.ogg            – weapon shop overlay
+        battle.ogg          – generic wave music
+        corruption_wave.ogg – plays during corruption (elite) waves
+        boss_malachar.ogg   – Malachar the Undying
+        boss_vexara.ogg     – Vexara the Hex-Weaver
+        boss_gorvak.ogg     – Gorvak Ironhide
+        boss_seraphix.ogg   – Seraphix the Fallen
+        boss_nyxoth.ogg     – Nyxoth the Abyssal
+
+    Place your icon and logo files alongside the script too:
+        icon.png            – window icon (32×32 or 64×64 recommended)
+        logo.png            – splash logo on the main menu
+    """
+
+    # Map boss names (lowercase, no spaces) to track filenames
+    BOSS_TRACKS = {
+        "malachar the undying":  "boss_malachar",
+        "vexara the hex-weaver": "boss_vexara",
+        "gorvak ironhide":       "boss_gorvak",
+        "seraphix the fallen":   "boss_seraphix",
+        "nyxoth the abyssal":    "boss_nyxoth",
+    }
+
+    # Candidates tried in order when loading a track
+    EXTENSIONS = [".ogg", ".mp3", ".wav"]
+
+    def __init__(self):
+        self._current = None   # track key currently loaded/playing
+        self.enabled  = pygame.mixer.get_init() is not None
+        self.volume   = 0.5
+        if self.enabled:
+            pygame.mixer.music.set_volume(self.volume)
+
+    def _find(self, base):
+        """Return the first existing file matching base + any extension, or None."""
+        for ext in self.EXTENSIONS:
+            path = asset(base + ext)
+            if os.path.isfile(path):
+                return path
+        return None
+
+    def play(self, key, loops=-1, fadein=800):
+        """Play a track by key (e.g. 'menu', 'battle', 'boss_malachar').
+        Does nothing if already playing the same track or file not found."""
+        if not self.enabled or key == self._current:
+            return
+        path = self._find(key)
+        if path is None:
+            # Not a hard error — just skip missing files
+            if self._current is not None:
+                pygame.mixer.music.stop()
+                self._current = None
+            return
+        try:
+            pygame.mixer.music.fadeout(400)
+            pygame.mixer.music.load(path)
+            pygame.mixer.music.set_volume(self.volume)
+            pygame.mixer.music.play(loops, fade_ms=fadein)
+            self._current = key
+        except pygame.error as e:
+            print(f"[Music] Could not play '{path}': {e}")
+
+    def play_boss(self, boss_name):
+        """Look up the boss-specific track and play it."""
+        key = self.BOSS_TRACKS.get(boss_name.lower())
+        if key:
+            self.play(key)
+        else:
+            self.play("battle")   # fallback for unknown bosses
+
+    def stop(self, fadeout=600):
+        if not self.enabled: return
+        pygame.mixer.music.fadeout(fadeout)
+        self._current = None
+
+    def set_volume(self, vol):
+        self.volume = max(0.0, min(1.0, vol))
+        if self.enabled:
+            pygame.mixer.music.set_volume(self.volume)
+
+
+# Global music instance — created once, shared everywhere
+MUSIC = Music()
+
+# ── Sound Effects manager ─────────────────────────────────────────────────────
+
+class SFX:
+    """
+    Centralised sound-effects controller using pygame.mixer.Sound channels.
+    All files live in the same folder as the script.
+    Missing files are silently skipped.
+
+    Expected filenames (WAV recommended, OGG/MP3 also work):
+        sfx_shoot.wav                   – player fires a bullet
+        sfx_shoot_rapid.wav             – rapid-fire variant (Storm Pistol)
+        sfx_player_hit.wav              – player takes damage
+        sfx_player_dash.wav             – player dashes
+        sfx_enemy_death.wav             – regular enemy dies
+        sfx_boss_death.wav              – boss dies
+        sfx_boss_spawn.wav              – boss materialises (thud at intro frame 30)
+        sfx_goblin_dash.wav             – goblin starts a dash
+        sfx_orc_spin.wav                – orc rage spin triggers
+        sfx_mage_blink.wav              – mage teleports
+        sfx_dragon_orb.wav              – dragon drops a fire orb
+        sfx_slime_spit.wav              – slime spits a blob
+        sfx_level_up.wav                – player levels up
+        sfx_shoot_corrupted_homing.wav  – Corrupted Seeker fires a homing bolt
+    """
+
+    EXTENSIONS = [".wav", ".ogg", ".mp3"]
+
+    def __init__(self):
+        self.enabled = pygame.mixer.get_init() is not None
+        self.volume  = 0.6
+        self._cache  = {}   # key -> pygame.mixer.Sound or None
+
+    def _load(self, key):
+        if key in self._cache:
+            return self._cache[key]
+        for ext in self.EXTENSIONS:
+            path = asset(f"sfx_{key}{ext}")
+            if os.path.isfile(path):
+                try:
+                    snd = pygame.mixer.Sound(path)
+                    snd.set_volume(self.volume)
+                    self._cache[key] = snd
+                    return snd
+                except pygame.error as e:
+                    print(f"[SFX] Could not load sfx_{key}: {e}")
+        self._cache[key] = None   # remember miss so we don't retry every frame
+        return None
+
+    def play(self, key, volume_scale=1.0):
+        """Play a sound effect by key. volume_scale lets callers quieten one-offs."""
+        if not self.enabled:
+            return
+        snd = self._load(key)
+        if snd:
+            snd.set_volume(min(1.0, self.volume * volume_scale))
+            snd.play()
+
+    def set_volume(self, vol):
+        self.volume = max(0.0, min(1.0, vol))
+        # Update all already-loaded sounds
+        for snd in self._cache.values():
+            if snd:
+                snd.set_volume(self.volume)
+
+
+# Global SFX instance
+SOUNDS = SFX()
+
+# ── Menu background video ─────────────────────────────────────────────────────
+
+class MenuVideo:
+    """
+    Plays a looping video as the menu background using OpenCV.
+    Falls back gracefully if cv2 is not installed or the file is missing.
+
+    Place the video file next to the script:
+        menu_bg.mp4   (or .avi / .webm / .mov)
+
+    Install OpenCV if needed:
+        pip install opencv-python
+    """
+    EXTENSIONS = [".mp4", ".avi", ".webm", ".mov"]
+
+    def __init__(self):
+        self._cap    = None
+        self._surf   = None
+        self._loaded = False
+        if not _CV2_AVAILABLE:
+            print("[MenuVideo] cv2 not installed — video background disabled. "
+                  "Run: pip install opencv-python")
+            return
+        for ext in self.EXTENSIONS:
+            path = asset(f"menu_bg{ext}")
+            if os.path.isfile(path):
+                cap = cv2.VideoCapture(path)
+                if cap.isOpened():
+                    self._cap    = cap
+                    self._loaded = True
+                    print(f"[MenuVideo] Loaded {path}")
+                    break
+                cap.release()
+        if not self._loaded:
+            print("[MenuVideo] No menu_bg video found — place menu_bg.mp4 next to the script.")
+
+    def next_frame(self, target_w, target_h):
+        """Return a pygame Surface of the next video frame, or None if unavailable."""
+        if not self._loaded or self._cap is None:
+            return None
+        ok, frame = self._cap.read()
+        if not ok:
+            # Loop: rewind to start
+            self._cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+            ok, frame = self._cap.read()
+            if not ok:
+                return None
+        # cv2 gives BGR — convert to RGB
+        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        # Scale to screen size
+        fh, fw = frame.shape[:2]
+        if fw != target_w or fh != target_h:
+            frame = cv2.resize(frame, (target_w, target_h),
+                               interpolation=cv2.INTER_LINEAR)
+        # Convert numpy array → pygame Surface
+        surf = pygame.surfarray.make_surface(frame.swapaxes(0, 1))
+        return surf
+
+    def release(self):
+        if self._cap:
+            self._cap.release()
+            self._cap = None
+
+# ── Leaderboard ───────────────────────────────────────────────────────────────
+
+LEADERBOARD_FILE = os.path.join(DATA_DIR, "leaderboard.json")
+LEADERBOARD_MAX  = 10
+
+class Leaderboard:
+    def __init__(self):
+        self.entries = self._load()
+
+    def _load(self):
+        try:
+            with open(LEADERBOARD_FILE, "r") as f:
+                data = json.load(f)
+            # Validate shape
+            entries = []
+            for e in data:
+                if all(k in e for k in ("name", "wave", "level", "kills", "bosses")):
+                    entries.append(e)
+            return entries[:LEADERBOARD_MAX]
+        except (FileNotFoundError, json.JSONDecodeError):
+            return []
+
+    def _save(self):
+        try:
+            with open(LEADERBOARD_FILE, "w") as f:
+                json.dump(self.entries, f, indent=2)
+        except Exception as e:
+            print(f"[Leaderboard] Could not save: {e}")
+
+    def submit(self, name, wave, level, kills, bosses):
+        """Insert a new run. Returns the rank (1-based) if it made top 10, else None."""
+        entry = {"name": name, "wave": wave, "level": level,
+                 "kills": kills, "bosses": bosses}
+        self.entries.append(entry)
+        # Sort: primary wave desc, secondary level desc, tertiary kills desc
+        self.entries.sort(key=lambda e: (e["wave"], e["level"], e["kills"]), reverse=True)
+        self.entries = self.entries[:LEADERBOARD_MAX]
+        self._save()
+        try:
+            return self.entries.index(entry) + 1
+        except ValueError:
+            return None  # didn't make top 10
+
+    def draw(self, surf, fonts, x, y, w, highlight_name=None):
+        """Draw the leaderboard table at (x,y) with width w. Returns height used."""
+        title = fonts["large"].render("TOP 10 LEADERBOARD", True, YELLOW)
+        surf.blit(title, (x + w // 2 - title.get_width() // 2, y))
+        y += 38
+
+        # Header row
+        pygame.draw.line(surf, (70, 70, 90), (x, y), (x + w, y), 1)
+        col_x = [x + 4, x + 32, x + 170, x + 270, x + 340, x + 410]
+        headers = ["#", "Name", "Wave", "Level", "Kills", "Bosses"]
+        for cx, hdr in zip(col_x, headers):
+            hs = fonts["tiny"].render(hdr, True, GRAY)
+            surf.blit(hs, (cx, y + 4))
+        y += 22
+        pygame.draw.line(surf, (70, 70, 90), (x, y), (x + w, y), 1)
+        y += 4
+
+        if not self.entries:
+            empty = fonts["small"].render("No runs yet - be the first!", True, GRAY)
+            surf.blit(empty, (x + w // 2 - empty.get_width() // 2, y + 12))
+            return y + 40
+
+        for i, e in enumerate(self.entries):
+            row_y = y + i * 26
+            # Highlight the player's own entry
+            is_highlight = (highlight_name and e["name"] == highlight_name)
+            if is_highlight:
+                hl = pygame.Surface((w, 24), pygame.SRCALPHA)
+                hl.fill((255, 215, 0, 35))
+                surf.blit(hl, (x, row_y))
+
+            rank_col = YELLOW if i == 0 else (CYAN if i == 1 else (ORANGE if i == 2 else GRAY))
+            text_col = YELLOW if is_highlight else WHITE
+
+            rank_s  = fonts["small"].render(f"{i+1}", True, rank_col)
+            name_s  = fonts["small"].render(e["name"][:14], True, text_col)
+            wave_s  = fonts["small"].render(str(e["wave"]), True, text_col)
+            level_s = fonts["small"].render(str(e["level"]), True, text_col)
+            kills_s = fonts["small"].render(str(e["kills"]), True, text_col)
+            boss_s  = fonts["small"].render(str(e["bosses"]), True, text_col)
+
+            for cx, surf_s in zip(col_x, [rank_s, name_s, wave_s, level_s, kills_s, boss_s]):
+                surf.blit(surf_s, (cx, row_y + 2))
+
+            # Subtle row separator
+            if i < len(self.entries) - 1:
+                pygame.draw.line(surf, (40, 40, 56),
+                                 (x, row_y + 25), (x + w, row_y + 25), 1)
+
+        return y + len(self.entries) * 26 + 8
+
+# ── Token Wallet ──────────────────────────────────────────────────────────────
+
+TOKEN_FILE = os.path.join(DATA_DIR, "tokens.json")
+
+class TokenWallet:
+    """Persistent token + cosmetic storage — survives game restarts and exe launches."""
+
+    def __init__(self):
+        data          = self._load_raw()
+        self.total    = max(0, int(data.get("tokens", 0)))
+        saved_owned   = data.get("owned_cosmetics", ["default"])
+        self.owned_cosmetics  = set(saved_owned) | {"default"}
+        self.active_cosmetic  = data.get("active_cosmetic", "default")
+        self.seraphix_kills   = max(0, int(data.get("seraphix_kills", 0)))
+        self.nyxoth_kills     = max(0, int(data.get("nyxoth_kills", 0)))
+        # Validation against COSMETICS happens lazily in sync_to_player()
+        # because COSMETICS isn't defined yet when TOKENS is first created.
+
+    def sync_to_player(self, player):
+        """Call after COSMETICS is defined to validate and push data onto a Player."""
+        valid_ids = {c["id"] for c in COSMETICS} | {"default"}
+        # Remove any cosmetics that no longer exist in the game
+        self.owned_cosmetics = self.owned_cosmetics & valid_ids | {"default"}
+        if self.active_cosmetic not in self.owned_cosmetics:
+            self.active_cosmetic = "default"
+        player.owned_cosmetics = set(self.owned_cosmetics)
+        player.active_cosmetic = self.active_cosmetic
+
+    def _load_raw(self):
+        try:
+            with open(TOKEN_FILE, "r") as f:
+                return json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            return {}
+
+    def _save(self):
+        try:
+            with open(TOKEN_FILE, "w") as f:
+                json.dump({
+                    "tokens":          self.total,
+                    "owned_cosmetics": list(self.owned_cosmetics),
+                    "active_cosmetic": self.active_cosmetic,
+                    "seraphix_kills":  self.seraphix_kills,
+                    "nyxoth_kills":    self.nyxoth_kills,
+                }, f, indent=2)
+        except Exception as e:
+            print(f"[Tokens] Could not save: {e}")
+
+    def earn(self, amount=1):
+        self.total += amount
+        self._save()
+
+    def spend(self, amount):
+        if self.total >= amount:
+            self.total -= amount
+            self._save()
+            return True
+        return False
+
+    def unlock_cosmetic(self, cosm_id):
+        self.owned_cosmetics.add(cosm_id)
+        self._save()
+
+    def equip_cosmetic(self, cosm_id):
+        if cosm_id in self.owned_cosmetics:
+            self.active_cosmetic = cosm_id
+            self._save()
+
+    def record_seraphix_kill(self):
+        self.seraphix_kills += 1
+        self._save()
+
+    def record_nyxoth_kill(self):
+        self.nyxoth_kills += 1
+        self._save()
+
+
+# Global wallet - loaded once, shared by all runs in a session
+TOKENS = TokenWallet()
+
+# -- Game settings (persisted next to exe) -------------------------------
+
+SETTINGS_FILE  = os.path.join(DATA_DIR, "settings.json")
+FIRST_RUN_FILE = os.path.join(DATA_DIR, "first_run.json")
+
+class GameSettings:
+    """Persists quality and volume settings across launches."""
+    def __init__(self):
+        data = self._load()
+        self.quality       = data.get("quality",       "high")
+        self.music_volume  = float(data.get("music_volume",  0.5))
+        self.sounds_volume = float(data.get("sounds_volume", 0.6))
+
+    def _load(self):
+        try:
+            with open(SETTINGS_FILE, "r") as f:
+                return json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            return {}
+
+    def save(self):
+        try:
+            with open(SETTINGS_FILE, "w") as f:
+                json.dump({
+                    "quality":       self.quality,
+                    "music_volume":  MUSIC.volume,
+                    "sounds_volume": SOUNDS.volume,
+                }, f, indent=2)
+        except Exception as e:
+            print(f"[Settings] Could not save: {e}")
+
+    @property
+    def low(self):
+        return self.quality == "low"
+
+
+GAME_SETTINGS = GameSettings()
+# Apply persisted volumes immediately
+MUSIC.set_volume(GAME_SETTINGS.music_volume)
+SOUNDS.set_volume(GAME_SETTINGS.sounds_volume)
+
+# --- Constants ---
+SW, SH = 1280, 720
+FPS = 60
+WHITE  = (255,255,255)
+BLACK  = (0,0,0)
+RED    = (220, 50, 50)
+GREEN  = (50, 200, 80)
+BLUE   = (50, 120, 220)
+YELLOW = (255, 215, 0)
+ORANGE = (255, 140, 0)
+PURPLE = (160, 50, 200)
+CYAN   = (0, 200, 220)
+GRAY   = (100, 100, 110)
+DARK   = (18, 18, 28)
+PANEL  = (28, 28, 42)
+
+WAVE_BREAK_SECS = 10
+GAME_VERSION    = "37.0 Build 9"
+
+# ── Patch notes (2 most recent, newest first) ─────────────────────────────────
+# Each entry: {"version": str, "date": str, "changes": [("category", "text"), ...]}
+# Categories: "added", "changed", "fixed", "removed"
+PATCH_NOTES = [
+    {
+        "version": "37.0",
+        "date":    "18-03-2026",
+        "changes": [
+            ("changed",   "Optimisation changes to the boss battle arena code."),
+            ("changed",   "Optimisation changes to the BossIntro code."),
+            ("changed",   "Menu bg video and slideshow images have been updated."),
+            ("changed",   "Updated game logo."),
+            ("changed",   "Updated game title."),
+        ],
+    },
+    {
+        "version": "36.3",
+        "date":    "18-03-2026",
+        "changes": [
+            ("changed",   "Player movement speed and weapon firing speed no longer scales with level."),
+            ("changed",   "Malachar's dash range in enraged mode is reduced."),
+            ("changed",   "Malachar's visuals have been reworked"),
+            ("fixed",   "Malachar being killed before spawning."),
+            ("fixed",   "UnboundLocalError: flash, causing a game crash when trying to draw Malachar."),
+            ("fixed",   "a tuple unpacking causing float contamination and crashing the game."),
+        ],
+    },
+]
+
+
+# ── Cosmetics ─────────────────────────────────────────────────────────────────
+# Each cosmetic: id (str), name, description, cost (tokens), pattern key
+# Patterns are drawn procedurally in Player.draw - no image files needed.
+# Add new entries here and handle their pattern key in Player.draw.
+
+COSMETICS = [
+    {
+        "id":      "default",
+        "name":    "Default",
+        "desc":    "The classic look",
+        "cost":    0,
+        "pattern": "default",
+        "preview": CYAN,
+    },
+    {
+        "id":      "fire",
+        "name":    "Inferno",
+        "desc":    "Burns with inner flame",
+        "cost":    3,
+        "pattern": "fire",
+        "preview": (255, 100, 30),
+    },
+    {
+        "id":      "frost",
+        "name":    "Frostbite",
+        "desc":    "Icy crystalline shell",
+        "cost":    3,
+        "pattern": "frost",
+        "preview": (120, 200, 255),
+    },
+    {
+        "id":      "void",
+        "name":    "Void Walker",
+        "desc":    "Consumed by darkness",
+        "cost":    5,
+        "pattern": "void",
+        "preview": (100, 0, 180),
+    },
+    {
+        "id":      "gold",
+        "name":    "Gilded",
+        "desc":    "Worth its weight in gold",
+        "cost":    5,
+        "pattern": "gold",
+        "preview": YELLOW,
+    },
+    {
+        "id":      "storm",
+        "name":    "Stormborn",
+        "desc":    "Crackling with lightning",
+        "cost":    8,
+        "pattern": "storm",
+        "preview": (180, 220, 255),
+    },
+    {
+        "id":      "wings",
+        "name":    "Seraph Wings",
+        "desc":    "Wings of a Fallen Angel",
+        "cost":    10,
+        "pattern": "wings",
+        "preview": (220, 200, 255),
+        "req_seraphix_kills": 15,
+    },
+    {
+        "id":      "blackhole",
+        "name":    "Black Hole",
+        "desc":    "There is no light here",
+        "cost":    10,
+        "pattern": "blackhole",
+        "preview": (20, 0, 60),
+        "req_nyxoth_kills": 15,
+    },
+]
+
+# ── Tips (shown on main menu, rotating yellow text) ──────────────────────────
+# Add, remove, or edit tips freely — they cycle one at a time.
+MENU_TIPS = [
+    "Bosses drop 1 Token when defeated - spend them in the Token Shop!",
+    "If you are struggling, try to get the enemy's health below 0 before your health reaches 0, works every time!",
+    "Beat multiple Corruption Waves to unlock Corrupted weapons!",
+    "Corrupted enemies drop more gold and XP than regular ones, but are also more difficult.",
+    "You get a choice of 3 perk cards every 5 waves, they can make your run easier, if you get lucky!",
+    "Avoid staying in one spot for too long, enemies will try to corner you at any chance!",
+    "Gorvak Ironhide summons minions, watch your step :)",
+    "If the Nail Gun is not doing it anymore, the Weapon Shop sells additional weapons.",
+]
+
+# ── Credits ───────────────────────────────────────────────────────────────────
+CREDITS = {
+    "License": [
+        "This game is Licensed under the GNU General Public License v3.0,",
+        "please read LICENSE.txt for more information."
+    ],
+    "Lead Developer": [
+        "Gert L.",
+    ],
+    "Music & SFX": [
+        "DISCLAIMER: Some of the music or SFX may have been AI generated.",
+        "",
+        "Music:",
+        "pixabay.com - daub_audo - Shot In The Dark",
+        "Bensound.com - Telune (WGVQEPS9APL09KEB) - Nassau",
+        "pixabay.com - psychronic - Rhythym of the Deep",
+        "John Dungeon - Malachar",
+        "John Dungeon - Nyxoth",
+        "John Dungeon - Seraphix",
+        "John Dungeon - Gorvak",
+        "John Dungeon - Battle",
+        "John Dungeon - Menu",
+        "",
+        "SFX:",
+        "pixabay.com - VoiceBosch - The Moses (Laser Cannon)",
+        "freesound.org - aust_paul - possiblelazer",
+        "freesound.org - zuzek06 - slimejump",
+        "freesound.org - qubodup - cloud-poof",
+        "freesound.org - theogobbo - pgj-breach",
+        "freesound.org - uzbazur - low-frequency-stomp",
+        "freesound.org - shinephoenixstormcrow 320655 rhodesmas - level-up-01",
+        "freesound.org - marregheriti - shotgun",
+        "freesound.org - hadahector - electric-woosh",
+        "freesound.org - michael grinnell - laser-shot",
+        "freesound.org - qubodup - m16-single-shot-4",
+        "freesound.org - nsstudios - laser3",
+        "freesound.org - syna max - monster_death_scream",
+        "freesound.org - raclure - damage-sound-effect",
+        "freesound.org - gprosser - splat",
+        "freesound.org - mokasza - fast-whoosh",
+        "freesound.org - j1987 - spinning_firework_2",
+        "pixabay.com - xg7ssi08yr - laser",
+    ],
+    "Playtesters": [
+        "Empty!",
+    ],
+}
+
+WEAPONS = [
+    # fire_interval = frames between shots when holding mouse (at 60fps)
+    {
+        "name": "Nail Gun",        "damage": 14,  "speed": 0.55, "range": 260,
+        "cost": 0,    "req_lvl": 1,  "color": GRAY,
+        "proj_size": 4,  "behaviour": "single",   "fire_interval": 12,
+        "desc": "Fast reliable single shot",
+    },
+    {
+        "name": "Twin Blaster",    "damage": 18,  "speed": 0.50, "range": 300,
+        "cost": 80,   "req_lvl": 3,  "color": CYAN,
+        "proj_size": 5,  "behaviour": "twin",     "fire_interval": 14,
+        "desc": "Two parallel bolts",
+    },
+    {
+        "name": "Scatter Shot",    "damage": 20,  "speed": 0.52, "range": 200,
+        "cost": 180,  "req_lvl": 5,  "color": ORANGE,
+        "proj_size": 5,  "behaviour": "shotgun",  "fire_interval": 22,
+        "desc": "5-bullet spread, short range",
+    },
+    {
+        "name": "Plasma Cannon",   "damage": 70,  "speed": 0.44, "range": 380,
+        "cost": 320,  "req_lvl": 7,  "color": (100, 80, 255),
+        "proj_size": 12, "behaviour": "single",   "fire_interval": 32,
+        "desc": "Massive high-damage bolt",
+    },
+    {
+        "name": "Tri-Laser",       "damage": 32,  "speed": 0.54, "range": 340,
+        "cost": 500,  "req_lvl": 10, "color": (0, 255, 180),
+        "proj_size": 6,  "behaviour": "spread3",  "fire_interval": 16,
+        "desc": "Three beams in a fan",
+    },
+    {
+        "name": "Void Orbiter",    "damage": 38,  "speed": 0.50, "range": 360,
+        "cost": 750,  "req_lvl": 999, "color": (160, 0, 220),
+        "proj_size": 7,  "behaviour": "orbit",    "fire_interval": 40,
+        "desc": "Spinning ring of bullets",
+    },
+    {
+        "name": "Storm Pistol",    "damage": 20,  "speed": 0.62, "range": 300,
+        "cost": 1000, "req_lvl": 16, "color": (80, 200, 255),
+        "proj_size": 4,  "behaviour": "rapid",    "fire_interval": 7,
+        "desc": "Rapid-fire auto",
+    },
+    {
+        "name": "Seeker Array",    "damage": 50,  "speed": 0.44, "range": 600,
+        "cost": 1300, "req_lvl": 20, "color": (255, 80, 180),
+        "proj_size": 7,  "behaviour": "homing",   "fire_interval": 28,
+        "desc": "Homing bullets seek enemies",
+    },
+    {
+        "name": "Oblivion Cannon", "damage": 90,  "speed": 0.56, "range": 480,
+        "cost": 2000, "req_lvl": 25, "color": YELLOW,
+        "proj_size": 10, "behaviour": "penta",    "fire_interval": 24,
+        "desc": "5-way spread, pierces enemies",
+    },
+]
+
+# ── Special / secret weapons (shown on Weapons page 2) ────────────────────────
+# unlock_condition: dict with type and value, checked in shop draw/buy logic
+SPECIAL_WEAPONS = [
+    {
+        "name":      "Corrupted Seeker",
+        "damage":    85,
+        "speed":     0.40,
+        "range":     700,
+        "cost":      2500,
+        "req_lvl":   15,
+        "color":     (140, 0, 200),
+        "proj_size": 9,
+        "behaviour": "corrupted_homing",
+        "fire_interval": 40,
+        "desc":      "4 aggressive homing bolts",
+        "unlock_type":  "corruption_waves",
+        "unlock_value": 5,
+        "unlock_hint":  "Clear 5 Corruption Waves to unlock",
+    },
+]
+
+ENEMY_TYPES = [
+    # Slime — splits into two tiny slimes on death, bounces erratically
+    {"name": "Slime",    "base_hp": 35,  "base_dmg": 6,  "base_spd": 1.2,  "gold": 3,  "color": GREEN,         "size": 14, "xp": 12,  "behaviour": "bounce"},
+    # Goblin — fast, dashes at player every few seconds
+    {"name": "Goblin",   "base_hp": 55,  "base_dmg": 10, "base_spd": 1.8,  "gold": 6,  "color": ORANGE,        "size": 15, "xp": 22,  "behaviour": "dash"},
+    # Orc — slow tank that briefly spins and fires 6 projectiles when hurt below 50 %
+    {"name": "Orc",      "base_hp": 140, "base_dmg": 18, "base_spd": 0.85, "gold": 12, "color": RED,           "size": 22, "xp": 45,  "behaviour": "tank"},
+    # Mage — keeps distance, fires 3-way spread, occasionally blinks sideways
+    {"name": "Mage",     "base_hp": 75,  "base_dmg": 22, "base_spd": 0.85, "gold": 16, "color": PURPLE,        "size": 17, "xp": 60,  "behaviour": "mage"},
+    # Dragon — slow, fires aimed double-shot + drops a lingering fire orb on tile
+    {"name": "Dragon",   "base_hp": 420, "base_dmg": 35, "base_spd": 0.65, "gold": 55, "color": (180, 30, 30), "size": 30, "xp": 200, "behaviour": "dragon"},
+]
+
+def elite_wave_chance(player_level):
+    """Returns the probability (0-1) that a wave is an elite wave.
+    0.5% at level 1, scaling linearly up to 25% at level 25."""
+    min_chance = 0.005   # 0.5% at level 1
+    max_chance = 0.25    # 25% at level 25
+    level_cap  = Player.LEVEL_CAP   # 25
+    t = max(0, min(1, (player_level - 1) / (level_cap - 1)))
+    return min_chance + t * (max_chance - min_chance)
+
+# ── Elite variant definitions (one per base enemy type, same order) ────────────
+# These override colour, size, and stat multipliers. Behaviours are extended
+# in Enemy.update via self.elite flag.
+ELITE_VARIANTS = [
+    # Elite Slime  → "Plague Slime"  — toxic green/black, splits into 3 elite splinters, acid trail
+    {"name": "Plague Slime",  "color": (30, 180, 60),   "glow": (0, 80, 0),    "hp_mult": 2.0, "dmg_mult": 1.6, "spd_mult": 1.3, "size_add": 4},
+    # Elite Goblin → "Shadow Stalker" — dark purple, double-dashes, leaves shadow traps
+    {"name": "Shadow Stalker","color": (80, 20, 140),   "glow": (160, 0, 255), "hp_mult": 1.8, "dmg_mult": 1.7, "spd_mult": 1.5, "size_add": 2},
+    # Elite Orc    → "Berserker Orc" — dark red/gold, permanent rage aura, 3-shot cannon
+    {"name": "Berserker Orc", "color": (160, 20, 0),    "glow": (255, 120, 0), "hp_mult": 2.2, "dmg_mult": 2.0, "spd_mult": 1.2, "size_add": 6},
+    # Elite Mage   → "Void Mage"     — deep blue/white, 5-way spread, rapid blink-fire combos
+    {"name": "Void Mage",     "color": (10, 10, 120),   "glow": (100, 180, 255),"hp_mult": 1.7,"dmg_mult": 1.8, "spd_mult": 1.3, "size_add": 2},
+    # Elite Dragon → "Inferno Drake" — black/orange, lays 3 fire orbs, fires 4-way spread
+    {"name": "Inferno Drake", "color": (20, 10, 10),    "glow": (255, 80, 0),  "hp_mult": 2.5, "dmg_mult": 2.2, "spd_mult": 1.15,"size_add": 8},
+]
+# hp/dmg/spd are BASE values at level 1. Scale formula applied on top.
+BOSS_TYPES = [
+    {
+        "name":    "Malachar the Undying",
+        "title":   "The Unkillable",
+        "color":   (180, 20, 20),
+        "size":    46,
+        "base_hp": 1650,
+        "base_dmg": 28,
+        "base_spd": 1.1,
+        "gold":    400,
+        "xp":      600,
+        "pattern": "charge",
+        "proj_col": (220, 60, 60),
+    },
+    {
+        "name":    "Vexara the Hex-Weaver",
+        "title":   "Mistress of Chaos",
+        "color":   (140, 0, 200),
+        "size":    40,
+        "base_hp": 2200,
+        "base_dmg": 35,
+        "base_spd": 0.9,
+        "gold":    380,
+        "xp":      580,
+        "pattern": "spiral",
+        "proj_col": (200, 80, 255),
+    },
+    {
+        "name":    "Gorvak Ironhide",
+        "title":   "The Unbreakable",
+        "color":   (80, 130, 80),
+        "size":    52,
+        "base_hp": 2450,
+        "base_dmg": 22,
+        "base_spd": 0.65,
+        "gold":    500,
+        "xp":      700,
+        "pattern": "burst",
+        "proj_col": (120, 200, 120),
+    },
+    {
+        "name":    "Seraphix the Fallen",
+        "title":   "Angel of Ruin",
+        "color":   (220, 180, 30),
+        "size":    44,
+        "base_hp": 1400,
+        "base_dmg": 40,
+        "base_spd": 1.3,
+        "gold":    420,
+        "xp":      650,
+        "pattern": "orbit",
+        "proj_col": (255, 220, 60),
+    },
+    {
+        "name":    "Nyxoth the Abyssal",
+        "title":   "Devourer of Light",
+        "color":   (20, 20, 60),
+        "size":    50,
+        "base_hp": 2050,
+        "base_dmg": 50,
+        "base_spd": 0.75,
+        "gold":    550,
+        "xp":      800,
+        "pattern": "homing",
+        "proj_col": (60, 60, 180),
+    },
+]
+
+# ── Perk definitions ─────────────────────────────────────────────────────────
+# Each perk: stat key, display label, per-pick bonus, icon, color, description
+ALL_PERKS = [
+    {"key": "dmg_pct",    "label": "Damage",      "bonus": 0.08, "icon": "+",  "color": ORANGE,       "desc": "+8% bullet damage"},
+    {"key": "defense",    "label": "Defense",     "bonus": 0.08, "icon": "D",  "color": BLUE,         "desc": "-8% damage taken"},
+    {"key": "speed_pct",  "label": "Speed",       "bonus": 0.06, "icon": ">>", "color": CYAN,         "desc": "+6% move speed"},
+    {"key": "hp_regen",   "label": "Regen",       "bonus": 1,    "icon": "+",  "color": GREEN,        "desc": "+1 HP per 3s"},
+    {"key": "max_hp_pct", "label": "Vitality",    "bonus": 0.10, "icon": "H",  "color": RED,          "desc": "+10% max HP"},
+    {"key": "gold_pct",   "label": "Greed",       "bonus": 0.15, "icon": "G",  "color": YELLOW,       "desc": "+15% gold drops"},
+    {"key": "range_pct",  "label": "Range",       "bonus": 0.10, "icon": "~",  "color": PURPLE,       "desc": "+10% bullet range"},
+    {"key": "fire_rate",  "label": "Fire Rate",   "bonus": 0.08, "icon": "*",  "color": (255,100,30), "desc": "+8% fire rate"},
+    {"key": "dash",       "label": "Dash Mastery","bonus": 1,    "icon": "Z",  "color": (80,220,255), "desc": "-15% dash cooldown, +1 charge"},
+]
+
+# ── helpers ──────────────────────────────────────────────────────────────────
+
+def lerp_color(c1, c2, t):
+    return tuple(max(0, min(255, int(c1[i] + (c2[i] - c1[i]) * t))) for i in range(3))
+
+def draw_bar(surf, x, y, w, h, val, maxval, col, bg=(40, 40, 55)):
+    pygame.draw.rect(surf, bg, (x, y, w, h), border_radius=4)
+    if maxval > 0:
+        fill = max(0, int(w * val / maxval))
+        if fill > 0:
+            pygame.draw.rect(surf, col, (x, y, fill, h), border_radius=4)
+    pygame.draw.rect(surf, (80, 80, 100), (x, y, w, h), 1, border_radius=4)
+
+# ── Gold coin (physical pickup) ───────────────────────────────────────────────
+
+class GoldCoin:
+    PICKUP_RADIUS = 40
+    BOB_SPEED     = 0.08
+
+    def __init__(self, x, y, amount):
+        self.x = float(x)
+        self.y = float(y)
+        self.amount  = amount
+        self.alive   = True
+        self.bob_t   = random.uniform(0, math.pi * 2)
+        angle = random.uniform(0, math.pi * 2)
+        spd   = random.uniform(1.5, 3.5)
+        self.vx       = math.cos(angle) * spd
+        self.vy       = math.sin(angle) * spd
+        self.friction = 0.88
+        self.radius   = 5 if amount < 20 else (7 if amount < 60 else 10)
+
+    def update(self, player):
+        self.vx *= self.friction
+        self.vy *= self.friction
+        self.x  += self.vx
+        self.y  += self.vy
+        self.bob_t += self.BOB_SPEED
+        dist = math.hypot(self.x - player.x, self.y - player.y)
+        if dist < self.PICKUP_RADIUS:
+            bonus = int(self.amount * player.perk("gold_pct"))
+            player.gold += self.amount + bonus
+            self.alive = False
+
+    def draw(self, surf, cam):
+        bob_y = int(self.y - cam[1] + math.sin(self.bob_t) * 2)
+        sx    = int(self.x - cam[0])
+        pygame.draw.ellipse(surf, (10, 10, 20),
+                            (sx - self.radius, bob_y + self.radius - 2,
+                             self.radius * 2, self.radius))
+        pygame.draw.circle(surf, YELLOW,       (sx, bob_y), self.radius)
+        pygame.draw.circle(surf, (200, 160, 0),(sx, bob_y), self.radius - 1)
+        pygame.draw.circle(surf, (255, 235, 80),
+                           (sx - self.radius // 3, bob_y - self.radius // 3),
+                           max(1, self.radius // 3))
+        pygame.draw.circle(surf, (180, 130, 0),(sx, bob_y), self.radius, 1)
+
+# ── Particle ──────────────────────────────────────────────────────────────────
+
+class Particle:
+    def __init__(self, x, y, color, vx=None, vy=None):
+        self.x = x; self.y = y
+        self.color    = color
+        self.vx       = vx if vx is not None else random.uniform(-2, 2)
+        self.vy       = vy if vy is not None else random.uniform(-3, 0)
+        self.life     = random.randint(20, 40)
+        self.max_life = self.life
+        self.size     = random.randint(2, 5)
+
+    def update(self):
+        self.x += self.vx; self.y += self.vy
+        self.vy += 0.15
+        self.life -= 1
+
+    def draw(self, surf, cam):
+        t         = self.life / self.max_life
+        alpha_col = lerp_color(self.color, BLACK, 1 - t)
+        s         = max(1, int(self.size * t))
+        pygame.draw.circle(surf, alpha_col,
+                           (int(self.x - cam[0]), int(self.y - cam[1])), s)
+
+# ── Projectile ────────────────────────────────────────────────────────────────
+
+class Projectile:
+    # Pixel speed multiplier — higher = snappier bullets
+    SPD_SCALE = 22
+
+    def __init__(self, x, y, dx, dy, dmg, spd, rng, col, size, owner="player"):
+        self.x = x; self.y = y
+        self.dmg      = dmg
+        mag           = math.hypot(dx, dy) or 1
+        self.vx       = dx / mag * spd * self.SPD_SCALE
+        self.vy       = dy / mag * spd * self.SPD_SCALE
+        self.col      = col; self.size = size
+        self.owner    = owner
+        self.dist     = 0
+        self.max_dist = rng
+        self.alive    = True
+
+    def update(self):
+        self.x    += self.vx; self.y += self.vy
+        self.dist += math.hypot(self.vx, self.vy)
+        if self.dist >= self.max_dist:
+            self.alive = False
+
+    def draw(self, surf, cam):
+        sx = int(self.x - cam[0]); sy = int(self.y - cam[1])
+        # Draw as a streak: a line behind the bullet + bright tip
+        speed  = math.hypot(self.vx, self.vy) or 1
+        # Tail stretches 2.5× the bullet size behind travel direction
+        tail_len = max(self.size * 2, int(self.size * 2.5))
+        tx = sx - int(self.vx / speed * tail_len)
+        ty = sy - int(self.vy / speed * tail_len)
+        # Dim tail
+        tail_col = lerp_color(self.col, BLACK, 0.55)
+        pygame.draw.line(surf, tail_col, (tx, ty), (sx, sy), max(1, self.size - 2))
+        # Bright tip
+        pygame.draw.circle(surf, self.col, (sx, sy), self.size)
+        # Small glow on tip only
+        gs = self.size + 3
+        gsurf = pygame.Surface((gs * 2, gs * 2), pygame.SRCALPHA)
+        pygame.draw.circle(gsurf, (*self.col, 60), (gs, gs), gs)
+        surf.blit(gsurf, (sx - gs, sy - gs))
+
+# ── Player Homing Projectile ──────────────────────────────────────────────────
+
+class PlayerHomingProjectile(Projectile):
+    """Seeks the nearest enemy after a short arming delay."""
+    def __init__(self, x, y, dx, dy, dmg, spd, rng, col, size, enemies_ref):
+        super().__init__(x, y, dx, dy, dmg, spd, rng, col, size, owner="player")
+        self.enemies_ref = enemies_ref
+        self.turn_rate   = 0.06
+        self.arm_delay   = 12   # frames before homing kicks in
+
+    def update(self):
+        self.arm_delay = max(0, self.arm_delay - 1)
+        if self.arm_delay == 0:
+            # Find nearest living enemy — includes boss and Vexara clone
+            best_dist = 1e9; target = None
+            targets = list(self.enemies_ref)
+            targets += [b for b in getattr(self, '_boss_ref', []) if b and b.alive]
+            for e in targets:
+                if e.alive:
+                    d = math.hypot(e.x - self.x, e.y - self.y)
+                    if d < best_dist:
+                        best_dist = d; target = e
+            if target:
+                tx = target.x - self.x; ty = target.y - self.y
+                mag = math.hypot(tx, ty) or 1
+                tx /= mag; ty /= mag
+                cmag = math.hypot(self.vx, self.vy) or 1
+                cx = self.vx / cmag; cy = self.vy / cmag
+                nx = cx + tx * self.turn_rate
+                ny = cy + ty * self.turn_rate
+                nm = math.hypot(nx, ny) or 1
+                self.vx = nx / nm * cmag
+                self.vy = ny / nm * cmag
+        self.x    += self.vx; self.y += self.vy
+        self.dist += math.hypot(self.vx, self.vy)
+        if self.dist >= self.max_dist:
+            self.alive = False
+
+class CorruptedHomingProjectile(PlayerHomingProjectile):
+    """More aggressive homing — locks on faster and has a shorter arm delay.
+    Draws with a dark purple/void colour trail."""
+    def __init__(self, x, y, dx, dy, dmg, spd, rng, col, size, enemies_ref):
+        super().__init__(x, y, dx, dy, dmg, spd, rng, col, size, enemies_ref)
+        self.turn_rate = 0.18   # much tighter than 0.06
+        self.arm_delay = 6      # arms faster
+
+    def draw(self, surf, cam):
+        sx = int(self.x - cam[0]); sy = int(self.y - cam[1])
+        speed = math.hypot(self.vx, self.vy) or 1
+        tail_len = max(self.size * 2, int(self.size * 3.5))
+        tx = sx - int(self.vx / speed * tail_len)
+        ty = sy - int(self.vy / speed * tail_len)
+        # Dark void tail
+        pygame.draw.line(surf, (60, 0, 100), (tx, ty), (sx, sy), max(1, self.size - 1))
+        # Bright corrupted tip
+        pygame.draw.circle(surf, self.col, (sx, sy), self.size)
+        # Void glow
+        gs = self.size + 5
+        gsurf = pygame.Surface((gs * 2, gs * 2), pygame.SRCALPHA)
+        r2 = max(0, min(255, self.col[0]))
+        g2 = max(0, min(255, self.col[1]))
+        b2 = max(0, min(255, self.col[2]))
+        pygame.draw.circle(gsurf, (r2, g2, b2, 80), (gs, gs), gs)
+        surf.blit(gsurf, (sx - gs, sy - gs))
+
+class OrbitProjectile(Projectile):
+    """
+    Void Orbiter ring bullet — all bullets spawn at the player and travel outward
+    in a ring centred on the aim direction, spinning as they expand.
+    """
+    def __init__(self, x, y, angle, dmg, spd, rng, col, size, ring_idx, ring_total):
+        super().__init__(x, y, math.cos(angle), math.sin(angle),
+                         dmg, spd, rng, col, size, owner="player")
+        self.base_angle = angle          # initial angle for this bullet
+        self.ring_idx   = ring_idx
+        self.ring_total = ring_total
+        self.spin_rate  = 0.07           # radians added per frame
+        self.age        = 0
+
+    def update(self):
+        self.age += 1
+        current_ang = self.base_angle + self.age * self.spin_rate
+        spd_mag = math.hypot(self.vx, self.vy)
+        self.vx = math.cos(current_ang) * spd_mag
+        self.vy = math.sin(current_ang) * spd_mag
+        self.x    += self.vx
+        self.y    += self.vy
+        self.dist += spd_mag
+        if self.dist >= self.max_dist:
+            self.alive = False
+
+# ── Pierce Projectile ─────────────────────────────────────────────────────────
+
+class PierceProjectile(Projectile):
+    """Passes through enemies (hits each only once)."""
+    def __init__(self, x, y, dx, dy, dmg, spd, rng, col, size):
+        super().__init__(x, y, dx, dy, dmg, spd, rng, col, size, owner="player")
+        self.hit_ids = set()   # enemy ids already struck
+
+# ── FloatingText ──────────────────────────────────────────────────────────────
+
+class FloatingText:
+    def __init__(self, x, y, text, color, size=18):
+        self.x = x; self.y = y
+        self.text     = text; self.color = color; self.size = size
+        self.life     = 60
+        self.max_life = 60
+
+    def update(self):
+        self.y    -= 1.2
+        self.life -= 1
+
+    def draw(self, surf, cam, font):
+        t   = self.life / self.max_life
+        col = lerp_color(self.color, WHITE, 0.3)
+        txt = font.render(self.text, True, col)
+        txt.set_alpha(int(255 * t))
+        surf.blit(txt, (int(self.x - cam[0]) - txt.get_width() // 2,
+                        int(self.y - cam[1])))
+
+# ── Player ────────────────────────────────────────────────────────────────────
+
+class Player:
+    def __init__(self, x, y, username="Player"):
+        self.x = float(x); self.y = float(y)
+        self.username       = username
+        self.size           = 18
+        self.speed          = 3.5
+        self.level          = 1
+        self.xp             = 0
+        self.xp_to_next     = 100
+        self.max_hp         = 100
+        self.hp             = 100
+        self.gold           = 0
+        self.weapon_idx     = 0
+        self.shoot_cooldown = 0
+        self.iframes        = 0
+        self.owned_weapons  = [0]
+        self.kill_count     = 0
+        self.corruption_waves_cleared = 0
+        self.owned_cosmetics  = set(TOKENS.owned_cosmetics)
+        self.active_cosmetic  = TOKENS.active_cosmetic
+        self._cosm_tick       = 0
+        TOKENS.sync_to_player(self)   # validates + syncs cosmetics now that COSMETICS is defined
+        # Perks: dict of key -> total stacked bonus (float)
+        self.perks          = {}   # e.g. {"dmg_pct": 0.16, "defense": 0.08}
+        self.regen_timer    = 0    # counts up to 180 (3s at 60fps)
+
+        # Dash
+        # Base values: 2 charges, 420-frame cooldown per charge (~7s), 14-frame duration
+        self.DASH_BASE_CD   = 420
+        self.DASH_DURATION  = 14
+        self.DASH_SPEED     = 11.0
+        self.dash_charges   = 2        # charges currently available
+        self.dash_cds       = [0, 0]   # per-charge cooldown counters (count up to DASH_CD)
+        self.dash_timer     = 0        # frames left in current dash
+        self.dash_vx        = 0.0
+        self.dash_vy        = 0.0
+        self.dash_trail     = []       # list of (x, y, alpha) for afterimage
+
+    @property
+    def weapon(self):
+        # Special weapons use indices 1000+
+        if self.weapon_idx >= 1000:
+            return SPECIAL_WEAPONS[self.weapon_idx - 1000]
+        return WEAPONS[self.weapon_idx]
+
+    def xp_for_level(self, lvl):
+        return int(100 * (lvl ** 1.4))
+
+    def perk(self, key):
+        """Return total stacked bonus for a perk key, 0.0 if not owned."""
+        return self.perks.get(key, 0.0)
+
+    def apply_perk(self, key, bonus):
+        self.perks[key] = self.perks.get(key, 0.0) + bonus
+        # If vitality perk, immediately update max_hp
+        if key == "max_hp_pct":
+            self.max_hp = int((100 + self.level * 15) * (1 + self.perk("max_hp_pct")))
+            self.hp = min(self.hp + 20, self.max_hp)
+
+    LEVEL_CAP = 25
+
+    def gain_xp(self, amount):
+        if self.level >= self.LEVEL_CAP:
+            return False   # already at cap — no more levelling
+        self.xp += amount
+        leveled  = False
+        while self.xp >= self.xp_to_next and self.level < self.LEVEL_CAP:
+            self.xp         -= self.xp_to_next
+            self.level      += 1
+            self.xp_to_next  = self.xp_for_level(self.level)
+            self.max_hp      = int((100 + self.level * 15) * (1 + self.perk("max_hp_pct")))
+            self.hp          = min(self.hp + 40, self.max_hp)
+            leveled = True
+        if self.level >= self.LEVEL_CAP:
+            self.xp = 0   # no overflow XP at cap
+        return leveled
+
+    def take_damage(self, dmg):
+        if self.iframes > 0:
+            return False
+        reduced = int(dmg * (1.0 - min(0.75, self.perk("defense"))))
+        self.hp      -= max(1, reduced)
+        self.iframes  = 45
+        return True
+
+    def can_shoot(self):
+        return self.shoot_cooldown <= 0
+
+    def shoot(self, dx, dy, projectiles, enemies_ref=None):
+        w      = self.weapon
+        spd    = w["speed"] * (1 + self.perk("fire_rate"))
+        dmg    = int((w["damage"] + self.level * 2) * (1 + self.perk("dmg_pct")))
+        rng    = w["range"] * (1 + self.perk("range_pct"))
+        col    = w["color"]
+        sz     = w["proj_size"]
+        beh    = w["behaviour"]
+        mag    = math.hypot(dx, dy) or 1
+        base_a = math.atan2(dy, dx)
+
+        def _proj(angle, dmg_=None, spd_=None, rng_=None, sz_=None):
+            a = angle
+            projectiles.append(Projectile(
+                self.x, self.y, math.cos(a), math.sin(a),
+                dmg_ or dmg, spd_ or spd, rng_ or rng, col, sz_ or sz))
+
+        if beh == "single":
+            _proj(base_a)
+
+        elif beh == "twin":
+            # Two parallel bolts offset perpendicular to aim
+            perp = base_a + math.pi / 2
+            off  = 8
+            for sign in (-1, 1):
+                ox = math.cos(perp) * off * sign
+                oy = math.sin(perp) * off * sign
+                projectiles.append(Projectile(
+                    self.x + ox, self.y + oy,
+                    math.cos(base_a), math.sin(base_a),
+                    dmg, spd, rng, col, sz))
+
+        elif beh == "shotgun":
+            # 5-bullet spread, slightly randomised angles
+            for i in range(5):
+                spread = -0.38 + i * 0.19 + random.uniform(-0.04, 0.04)
+                _proj(base_a + spread)
+
+        elif beh == "spread3":
+            for off in (-0.25, 0, 0.25):
+                _proj(base_a + off)
+
+        elif beh == "rapid":
+            # Single fast shot with tiny random spread for feel
+            _proj(base_a + random.uniform(-0.04, 0.04))
+
+        elif beh == "orbit":
+            # Ring of 10 bullets fired in the aimed direction — spins and expands from there
+            count = 10
+            for i in range(count):
+                # Offset each bullet evenly around a full circle, centred on aim direction
+                ang = base_a + (math.pi * 2 / count * i)
+                projectiles.append(OrbitProjectile(
+                    self.x, self.y,
+                    ang, dmg, spd, rng, col, sz, i, count))
+
+        elif beh == "homing":
+            # 3 homing seekers fanned slightly
+            boss_targets = getattr(self, '_boss_ref', [])
+            for off in (-0.2, 0, 0.2):
+                p = PlayerHomingProjectile(
+                    self.x, self.y,
+                    math.cos(base_a + off), math.sin(base_a + off),
+                    dmg, spd, rng, col, sz,
+                    enemies_ref or [])
+                p._boss_ref = boss_targets
+                projectiles.append(p)
+
+        elif beh == "corrupted_homing":
+            # 4 aggressive homing bolts spread at wider fan angles
+            boss_targets = getattr(self, '_boss_ref', [])
+            for off in (-0.30, -0.10, 0.10, 0.30):
+                p = CorruptedHomingProjectile(
+                    self.x, self.y,
+                    math.cos(base_a + off), math.sin(base_a + off),
+                    dmg, spd, rng, col, sz,
+                    enemies_ref or [])
+                p._boss_ref = boss_targets
+                projectiles.append(p)
+
+        elif beh == "penta":
+            # 5-way spread that pierces
+            for i in range(5):
+                a = base_a + (-0.4 + i * 0.2)
+                projectiles.append(PierceProjectile(
+                    self.x, self.y, math.cos(a), math.sin(a),
+                    dmg, spd, rng, col, sz))
+
+        self.shoot_cooldown = max(1, int(
+            w["fire_interval"] / (1 + self.perk("fire_rate"))))
+        # Per-weapon shoot sound
+        _sfx_scale = {
+            "rapid":             0.28,
+            "corrupted_homing":  0.55,
+        }.get(beh, 0.5)
+        # corrupted_homing has its own sound file; falls back to homing if missing
+        _sfx_key = beh if beh == "corrupted_homing" else beh
+        SOUNDS.play(f"shoot_{_sfx_key}", volume_scale=_sfx_scale)
+
+    def _dash_cd(self):
+        """Effective cooldown per charge, reduced by dash perk stacks."""
+        stacks = int(self.perk("dash") + 0.5)
+        return max(120, int(self.DASH_BASE_CD * (0.85 ** stacks)))
+
+    def _dash_max_charges(self):
+        """Total charges available: 2 base + 1 per perk stack."""
+        stacks = int(self.perk("dash") + 0.5)
+        return 2 + stacks
+
+    def try_dash(self, dx, dy):
+        """Attempt to use a dash charge. dx/dy is the intended direction."""
+        # Find a ready charge slot
+        for i in range(len(self.dash_cds)):
+            if self.dash_cds[i] <= 0:
+                self.dash_cds[i] = self._dash_cd()
+                mag = math.hypot(dx, dy) or 1
+                self.dash_vx = dx / mag * self.DASH_SPEED
+                self.dash_vy = dy / mag * self.DASH_SPEED
+                self.dash_timer = self.DASH_DURATION
+                self.iframes = self.DASH_DURATION + 6
+                SOUNDS.play("player_dash")
+                return True
+        return False
+
+    def update(self, keys, mx, my, cam, projectiles, world_bounds):
+        # Ensure charge list matches current max (can grow with perks)
+        max_charges = self._dash_max_charges()
+        while len(self.dash_cds) < max_charges:
+            self.dash_cds.append(0)
+
+        # Tick cooldowns
+        for i in range(len(self.dash_cds)):
+            if self.dash_cds[i] > 0:
+                self.dash_cds[i] -= 1
+
+        dx = dy = 0
+        if keys[pygame.K_w] or keys[pygame.K_UP]:    dy -= 1
+        if keys[pygame.K_s] or keys[pygame.K_DOWN]:  dy += 1
+        if keys[pygame.K_a] or keys[pygame.K_LEFT]:  dx -= 1
+        if keys[pygame.K_d] or keys[pygame.K_RIGHT]: dx += 1
+        if dx and dy:
+            dx *= 0.707; dy *= 0.707
+
+        # Dash movement overrides normal movement
+        if self.dash_timer > 0:
+            self.x += self.dash_vx
+            self.y += self.dash_vy
+            self.dash_timer -= 1
+            self.dash_trail.append((self.x, self.y, 200))
+        else:
+            spd = self.speed * (1 + self.perk("speed_pct"))
+            self.x = max(self.size, min(world_bounds[0] - self.size, self.x + dx * spd))
+            self.y = max(self.size, min(world_bounds[1] - self.size, self.y + dy * spd))
+
+        self.x = max(self.size, min(world_bounds[0] - self.size, self.x))
+        self.y = max(self.size, min(world_bounds[1] - self.size, self.y))
+
+        # Fade trail
+        self.dash_trail = [(tx, ty, a - 22) for tx, ty, a in self.dash_trail if a > 0]
+
+        if self.shoot_cooldown > 0:
+            self.shoot_cooldown -= 1
+        mouse_held = pygame.mouse.get_pressed()[0]
+        if self.shoot_cooldown == 0 and mouse_held:
+            wx = mx + cam[0]; wy = my + cam[1]
+            ddx = wx - self.x; ddy = wy - self.y
+            if math.hypot(ddx, ddy) > 5:
+                self.shoot(ddx, ddy, projectiles, enemies_ref=getattr(self, '_enemies_ref', []))
+        if self.iframes > 0:
+            self.iframes -= 1
+        # HP regen tick
+        regen = self.perk("hp_regen")
+        if regen > 0:
+            self.regen_timer += 1
+            if self.regen_timer >= 180:
+                self.regen_timer = 0
+                self.hp = min(self.max_hp, self.hp + int(regen))
+
+    def draw(self, surf, cam, font_small, font_tiny):
+        sx = int(self.x - cam[0]); sy = int(self.y - cam[1])
+        self._cosm_tick += 1
+
+        # Dash afterimage trail
+        for tx, ty, alpha in self.dash_trail:
+            trail_s = pygame.Surface((self.size * 2, self.size * 2), pygame.SRCALPHA)
+            pygame.draw.circle(trail_s, (80, 220, 255, max(0, min(255, int(alpha)))),
+                               (self.size, self.size), self.size)
+            surf.blit(trail_s, (int(tx - cam[0]) - self.size,
+                                int(ty - cam[1]) - self.size))
+
+        # Shadow
+        pygame.draw.ellipse(surf, (10, 10, 20),
+                            (sx - self.size, sy + self.size - 4, self.size * 2, 10))
+
+        # ── Cosmetic body draw ────────────────────────────────────────────────
+        hurt = self.iframes > 0 and self.iframes % 6 < 3
+        pat  = self.active_cosmetic
+        t    = self._cosm_tick
+
+        if hurt:
+            # For wings cosmetic, still draw the wings — only the orb goes white
+            if pat == "wings":
+                flap      = math.sin(t * 0.08)
+                flap_ang  = flap * 0.20
+
+                quill_offsets = [-0.55, -0.28, 0.0, 0.28, 0.52]
+                quill_lengths = [self.size + 28, self.size + 36, self.size + 42,
+                                 self.size + 36, self.size + 26]
+                quill_widths  = [4, 5, 6, 5, 4]
+
+                for side in (-1, 1):
+                    base   = math.pi if side == -1 else 0.0
+                    root_x = sx + int(math.cos(base) * (self.size - 4))
+                    root_y = sy
+                    for qi, (qoff, qlen, qw) in enumerate(zip(quill_offsets, quill_lengths, quill_widths)):
+                        flap_bias = (2 - qi) * 0.10
+                        ang   = base + (qoff + flap_ang * flap_bias) * side
+                        tip_x = sx + int(math.cos(ang) * qlen)
+                        tip_y = sy + int(math.sin(ang) * qlen) - int(flap * 8)
+                        pygame.draw.line(surf, (100, 60, 180), (root_x, root_y), (tip_x, tip_y), qw + 2)
+                        pygame.draw.line(surf, (210, 185, 255), (root_x, root_y), (tip_x, tip_y), qw)
+                        if qi == 2:
+                            pygame.draw.line(surf, (240, 230, 255), (root_x, root_y), (tip_x, tip_y), 2)
+                        steps = 5
+                        for bi in range(1, steps):
+                            frac  = bi / steps
+                            bx    = int(root_x + (tip_x - root_x) * frac)
+                            by    = int(root_y + (tip_y - root_y) * frac)
+                            barb_len = int((1 - frac) * 10 + 3)
+                            perp  = ang + math.pi / 2
+                            for bsign in (-1, 1):
+                                ex_b = bx + int(math.cos(perp) * barb_len * bsign)
+                                ey_b = by + int(math.sin(perp) * barb_len * bsign)
+                                pygame.draw.line(surf, (200, 180, 255, int(140 * (1 - frac))),
+                                                 (bx, by), (ex_b, ey_b), 1)
+                    tip_ang = base + (quill_offsets[2] + flap_ang) * side
+                    rim_x   = sx + int(math.cos(tip_ang) * (quill_lengths[2] + 4))
+                    rim_y   = sy + int(math.sin(tip_ang) * quill_lengths[2]) - int(flap * 8)
+                    pygame.draw.circle(surf, (230, 210, 255), (rim_x, rim_y), 3)
+                rng_state = t // 8
+                for sp in range(6):
+                    spark_seed = int(rng_state * 17 + sp * 31) & 0xFFFF
+                    spark_r    = (spark_seed % 22) + self.size
+                    spark_ang  = (spark_seed % 628) / 100.0
+                    spark_side = 1 if sp % 2 == 0 else -1
+                    spx = sx + spark_side * int(math.cos(spark_ang) * spark_r)
+                    spy = sy + int(math.sin(spark_ang) * spark_r * 0.55)
+                    spark_alpha = ((t + sp * 7) % 30)
+                    if spark_alpha < 15:
+                        sc = min(255, 160 + spark_alpha * 6)
+                        pygame.draw.circle(surf, (sc, sc, 255), (spx, spy), 2)
+            elif pat == "blackhole":
+                # Keep accretion disc during hurt — only orb flashes white
+                np_bh  = math.sin(t * 0.05) * 0.5 + 0.5
+                spin_a = t * 0.04
+                for ring_idx in range(2):
+                    ring_r   = self.size + 10 + ring_idx * 8
+                    dots     = 8 + ring_idx * 3
+                    ring_ang = spin_a * (1 if ring_idx == 0 else -1) * (1 + ring_idx * 0.5)
+                    disc_col = lerp_color((60, 0, 140), (180, 60, 255), np_bh)
+                    for di in range(dots):
+                        a   = ring_ang + (math.pi * 2 / dots) * di
+                        drx = sx + int(math.cos(a) * ring_r)
+                        dry = sy + int(math.sin(a) * ring_r * 0.38)
+                        pygame.draw.circle(surf, disc_col, (drx, dry), max(1, 3 - ring_idx))
+            pygame.draw.circle(surf, WHITE, (sx, sy), self.size)
+        elif pat == "default":
+            pygame.draw.circle(surf, CYAN, (sx, sy), self.size)
+        elif pat == "fire":
+            pygame.draw.circle(surf, (200, 60, 10), (sx, sy), self.size)
+            # Animated inner flame flicker
+            fr = max(4, self.size - 6 + int(math.sin(t * 0.25) * 3))
+            pygame.draw.circle(surf, (255, 160, 20), (sx, sy), fr)
+            pygame.draw.circle(surf, (255, 240, 80), (sx, sy - 2), max(2, fr - 5))
+        elif pat == "frost":
+            pygame.draw.circle(surf, (40, 120, 200), (sx, sy), self.size)
+            # Six crystal lines
+            for i in range(6):
+                a = math.pi / 3 * i + t * 0.01
+                ex2 = sx + int(math.cos(a) * (self.size - 3))
+                ey2 = sy + int(math.sin(a) * (self.size - 3))
+                pygame.draw.line(surf, (180, 230, 255), (sx, sy), (ex2, ey2), 1)
+            pygame.draw.circle(surf, (200, 240, 255), (sx, sy), self.size // 2)
+        elif pat == "void":
+            pygame.draw.circle(surf, (30, 0, 60), (sx, sy), self.size)
+            # Pulsing inner ring
+            pr = int(self.size * 0.55 + math.sin(t * 0.18) * 3)
+            pygame.draw.circle(surf, (140, 0, 220), (sx, sy), max(3, pr), 2)
+            pygame.draw.circle(surf, (60, 0, 100), (sx, sy), self.size // 3)
+        elif pat == "gold":
+            pygame.draw.circle(surf, (200, 150, 0), (sx, sy), self.size)
+            pygame.draw.circle(surf, (255, 215, 0), (sx, sy), self.size, 3)
+            pygame.draw.circle(surf, (255, 240, 100), (sx, sy), self.size // 2)
+        elif pat == "storm":
+            pygame.draw.circle(surf, (60, 80, 160), (sx, sy), self.size)
+            # Rotating lightning arc dots
+            for i in range(4):
+                a = math.pi / 2 * i + t * 0.12
+                lx = sx + int(math.cos(a) * (self.size - 4))
+                ly = sy + int(math.sin(a) * (self.size - 4))
+                pygame.draw.circle(surf, (200, 230, 255), (lx, ly), 3)
+            pygame.draw.circle(surf, (150, 200, 255), (sx, sy), self.size // 3)
+        elif pat == "wings":
+            # ── Draw wings BEHIND the orb first ──────────────────────────────
+            flap      = math.sin(t * 0.08)          # -1 to 1, slow gentle flap
+            flap_ang  = flap * 0.20                  # max ±0.20 rad tilt
+
+            # Wing feathers: each wing has 5 quills fanning outward
+            # Quill angles are relative to straight-sideways (math.pi for left, 0 for right)
+            quill_offsets = [-0.55, -0.28, 0.0, 0.28, 0.52]  # fan spread angles
+            quill_lengths = [self.size + 28, self.size + 36, self.size + 42,
+                             self.size + 36, self.size + 26]
+            quill_widths  = [4, 5, 6, 5, 4]
+
+            for side in (-1, 1):
+                base = math.pi if side == -1 else 0.0   # left wing points left, right points right
+                root_x = sx + int(math.cos(base) * (self.size - 4))
+                root_y = sy
+
+                for qi, (qoff, qlen, qw) in enumerate(zip(quill_offsets, quill_lengths, quill_widths)):
+                    # Apply flap: upper quills tilt more
+                    flap_bias = (2 - qi) * 0.10   # quills 0,1 tip up on flap-up
+                    ang = base + (qoff + flap_ang * flap_bias) * side
+
+                    tip_x = sx + int(math.cos(ang) * qlen)
+                    tip_y = sy + int(math.sin(ang) * qlen) - int(flap * 8)
+
+                    # Draw thick outer quill (dark purple base)
+                    pygame.draw.line(surf, (100, 60, 180),
+                                     (root_x, root_y), (tip_x, tip_y), qw + 2)
+                    # Mid quill (bright lavender)
+                    pygame.draw.line(surf, (210, 185, 255),
+                                     (root_x, root_y), (tip_x, tip_y), qw)
+                    # Inner highlight (white core on centre quill)
+                    if qi == 2:
+                        pygame.draw.line(surf, (240, 230, 255),
+                                         (root_x, root_y), (tip_x, tip_y), 2)
+
+                    # Feather barbs — short perpendicular lines along each quill
+                    steps = 5
+                    for bi in range(1, steps):
+                        frac = bi / steps
+                        bx = int(root_x + (tip_x - root_x) * frac)
+                        by = int(root_y + (tip_y - root_y) * frac)
+                        barb_len = int((1 - frac) * 10 + 3)
+                        perp = ang + math.pi / 2
+                        for bsign in (-1, 1):
+                            ex_b = bx + int(math.cos(perp) * barb_len * bsign)
+                            ey_b = by + int(math.sin(perp) * barb_len * bsign)
+                            barb_alpha = int(140 * (1 - frac))
+                            bs2 = pygame.Surface((abs(ex_b - bx) + 2, abs(ey_b - by) + 2), pygame.SRCALPHA)
+                            pygame.draw.line(surf, (200, 180, 255, barb_alpha),
+                                             (bx, by), (ex_b, ey_b), 1)
+
+                # Glowing edge rim along the outermost quill tip
+                tip_ang = base + (quill_offsets[2] + flap_ang) * side
+                rim_x = sx + int(math.cos(tip_ang) * (quill_lengths[2] + 4))
+                rim_y = sy + int(math.sin(tip_ang) * quill_lengths[2]) - int(flap * 8)
+                pygame.draw.circle(surf, (230, 210, 255), (rim_x, rim_y), 3)
+
+            # Shimmer sparkles around the wings
+            rng_state = t // 8   # changes every 8 ticks for a twinkling effect
+            for sp in range(6):
+                spark_seed = int(rng_state * 17 + sp * 31) & 0xFFFF
+                spark_r    = (spark_seed % 22) + self.size
+                spark_ang  = (spark_seed % 628) / 100.0
+                spark_side = 1 if sp % 2 == 0 else -1
+                spx = sx + spark_side * int(math.cos(spark_ang) * spark_r)
+                spy = sy + int(math.sin(spark_ang) * spark_r * 0.55)
+                spark_alpha = ((t + sp * 7) % 30)
+                if spark_alpha < 15:
+                    sc = min(255, 160 + spark_alpha * 6)
+                    pygame.draw.circle(surf, (sc, sc, 255), (spx, spy), 2)
+
+            # ── Now draw the orb on top ───────────────────────────────────────
+            # Core orb — no glow circles
+            pygame.draw.circle(surf, (160, 130, 210), (sx, sy), self.size)
+        elif pat == "blackhole":
+            t_bh   = self._cosm_tick
+            np_bh  = math.sin(t_bh * 0.05) * 0.5 + 0.5   # 0..1 pulse
+            spin_a = t_bh * 0.04   # rotation
+
+            # Accretion disc — two counter-rotating rings of dots
+            for ring_idx in range(2):
+                ring_r   = self.size + 10 + ring_idx * 8
+                dots     = 8 + ring_idx * 3
+                spin_dir = 1 if ring_idx == 0 else -1
+                ring_ang = spin_a * spin_dir * (1 + ring_idx * 0.5)
+                disc_col = lerp_color((60, 0, 140), (180, 60, 255), np_bh)
+                for di in range(dots):
+                    a   = ring_ang + (math.pi * 2 / dots) * di
+                    drx = sx + int(math.cos(a) * ring_r)
+                    dry = sy + int(math.sin(a) * ring_r * 0.38)
+                    dr  = max(1, 3 - ring_idx)
+                    gs2 = pygame.Surface((dr * 4, dr * 4), pygame.SRCALPHA)
+                    pygame.draw.circle(gs2, (*disc_col, 150), (dr * 2, dr * 2), dr * 2)
+                    surf.blit(gs2, (drx - dr * 2, dry - dr * 2))
+                    pygame.draw.circle(surf, disc_col, (drx, dry), dr)
+
+            # Event horizon glow
+            hz_r = self.size + 4 + int(np_bh * 4)
+            hs   = pygame.Surface((hz_r * 2 + 8, hz_r * 2 + 8), pygame.SRCALPHA)
+            pygame.draw.circle(hs, (20, 0, 60, int(100 + np_bh * 60)),
+                               (hz_r + 4, hz_r + 4), hz_r)
+            surf.blit(hs, (sx - hz_r - 4, sy - hz_r - 4))
+
+            # Pure black void with gravitational lens ring
+            pygame.draw.circle(surf, (0, 0, 0), (sx, sy), self.size)
+            pygame.draw.circle(surf, lerp_color((40, 0, 100), (120, 0, 200), np_bh),
+                               (sx, sy), self.size, 2)
+            pygame.draw.circle(surf, lerp_color((80, 0, 160), (200, 80, 255), np_bh),
+                               (sx, sy), int(self.size * 0.82), 1)
+        else:
+            pygame.draw.circle(surf, CYAN, (sx, sy), self.size)
+
+        pygame.draw.circle(surf, WHITE, (sx, sy), self.size, 2)
+
+        # Eye
+        mx_, my_ = pygame.mouse.get_pos()
+        ang = math.atan2(my_ - sy, mx_ - sx)
+        ex  = sx + int(math.cos(ang) * 8)
+        ey  = sy + int(math.sin(ang) * 8)
+        pygame.draw.circle(surf, DARK, (ex, ey), 5)
+
+        # Username label above player
+        name_surf = font_small.render(self.username, True, CYAN)
+        name_x    = sx - name_surf.get_width() // 2
+        name_y    = sy - self.size - 22
+        pad       = 4
+        bg_surf   = pygame.Surface(
+            (name_surf.get_width() + pad * 2, name_surf.get_height() + 2),
+            pygame.SRCALPHA)
+        bg_surf.fill((0, 0, 0, 140))
+        surf.blit(bg_surf, (name_x - pad, name_y - 2))
+        surf.blit(name_surf, (name_x, name_y))
+
+# ── Enemy ─────────────────────────────────────────────────────────────────────
+
+class Enemy:
+    def __init__(self, x, y, etype_idx, player_level, is_splinter=False, is_elite=False):
+        et          = ENEMY_TYPES[etype_idx]
+        self.etype  = etype_idx
+        self.name   = et["name"]
+        self.color  = et["color"]
+        self.size   = et["size"]
+        self.behaviour = et["behaviour"]
+        self.is_splinter = is_splinter
+
+        # Elite variant — explicitly set by spawner, splinters are never elite
+        self.elite = (is_elite and not is_splinter)
+        if self.elite:
+            ev = ELITE_VARIANTS[etype_idx]
+            self.name     = ev["name"]
+            self.color    = ev["color"]
+            self.glow_col = ev["glow"]
+            self.size     = et["size"] + ev["size_add"]
+        else:
+            self.glow_col = None
+
+        # Level-based scale
+        scale = 1 + (player_level - 1) * 0.15
+        if is_splinter:
+            scale *= 0.45
+
+        if self.elite:
+            ev = ELITE_VARIANTS[etype_idx]
+            self.max_hp    = int(et["base_hp"] * scale * ev["hp_mult"])
+            self.hp        = self.max_hp
+            self.dmg       = int(et["base_dmg"] * scale * ev["dmg_mult"])
+            self.gold_drop = int(et["gold"] * (1 + (player_level - 1) * 0.05) * 1.8)
+            self.xp_drop   = int(et["xp"] * scale * 1.5)
+            self.speed     = et["base_spd"] * (1 + player_level * 0.012) * ev["spd_mult"]
+        else:
+            self.max_hp    = int(et["base_hp"] * scale)
+            self.hp        = self.max_hp
+            self.dmg       = int(et["base_dmg"] * scale)
+            self.gold_drop = int(et["gold"] * (1 + (player_level - 1) * 0.05))
+            self.xp_drop   = int(et["xp"] * scale)
+            self.speed     = et["base_spd"] * (1 + player_level * 0.012)
+        self.x         = float(x); self.y = float(y)
+        self.alive     = True
+        self.hurt_flash = 0
+
+        # ── Shared timers ───────────────────────────────────────────────────
+        self.shoot_cd    = random.randint(40, 90)   # stagger so they don't all fire at once
+        self.ability_cd  = random.randint(60, 180)
+
+        # ── Behaviour-specific state ────────────────────────────────────────
+        # bounce (Slime)
+        self.bounce_vx   = random.uniform(-1.2, 1.2)
+        self.bounce_vy   = random.uniform(-1.2, 1.2)
+        self.split_done  = False
+
+        # dash (Goblin)
+        self.dash_vx = 0.0; self.dash_vy = 0.0
+        self.dash_timer  = 0      # frames remaining in dash
+        self.dash_trail  = []     # list of (x, y, alpha) for afterimage
+
+        # tank (Orc) — rage spin after first hit below 50 %
+        self.rage_triggered = False
+        self.spin_timer     = 0
+
+        # mage — blink cooldown
+        self.blink_cd    = random.randint(240, 420)
+
+        # dragon — lingering fire orbs list handled in Game, flag drops here
+        self.drop_orb    = False   # set True when Dragon fires; Game reads & clears
+
+        # generic
+        self.warn_flash  = 0   # visual telegraph before ability fires
+
+        # ── Elite-specific state ─────────────────────────────────────────────
+        self.elite_cd    = random.randint(80, 160)   # elite special ability timer
+        self.acid_trail  = []    # Plague Slime: list of (x, y, life)
+        self.shadow_trap = []    # Shadow Stalker: list of (x, y, life) ground traps
+
+    # ── helpers ──────────────────────────────────────────────────────────────
+
+    def _fire_single(self, projectiles, tx, ty, dmg_mult=1.0, spd=0.10,
+                     rng=340, col=None, size=7):
+        dx = tx - self.x; dy = ty - self.y
+        mag = math.hypot(dx, dy) or 1
+        projectiles.append(Projectile(self.x, self.y, dx / mag, dy / mag,
+            int(self.dmg * dmg_mult), spd, rng,
+            col or self.color, size, owner="enemy"))
+
+    def _fire_spread(self, projectiles, dx, dy, count, spread_rad,
+                     dmg_mult=1.0, spd=0.10, rng=340, col=None, size=7):
+        base = math.atan2(dy, dx)
+        for i in range(count):
+            if count == 1:
+                offset = 0
+            else:
+                offset = -spread_rad + (2 * spread_rad / (count - 1)) * i
+            a = base + offset
+            projectiles.append(Projectile(
+                self.x, self.y, math.cos(a), math.sin(a),
+                int(self.dmg * dmg_mult), spd, rng,
+                col or self.color, size, owner="enemy"))
+
+    def _fire_ring(self, projectiles, count, dmg_mult=0.7, spd=0.09,
+                   rng=280, col=None, size=6):
+        for i in range(count):
+            a = math.pi * 2 / count * i
+            projectiles.append(Projectile(
+                self.x, self.y, math.cos(a), math.sin(a),
+                int(self.dmg * dmg_mult), spd, rng,
+                col or self.color, size, owner="enemy"))
+
+    # ── update ───────────────────────────────────────────────────────────────
+
+    def update(self, player, projectiles, world_bounds):
+        if not self.alive:
+            return
+
+        dx   = player.x - self.x
+        dy   = player.y - self.y
+        dist = math.hypot(dx, dy) or 1
+
+        if self.hurt_flash  > 0: self.hurt_flash  -= 1
+        if self.warn_flash  > 0: self.warn_flash   -= 1
+        if self.ability_cd  > 0: self.ability_cd   -= 1
+        if self.shoot_cd    > 0: self.shoot_cd      -= 1
+
+        # ── BOUNCE (Slime) ────────────────────────────────────────────────────
+        if self.behaviour == "bounce":
+            # Drift erratically but also bias toward player
+            self.bounce_vx += dx / dist * 0.04
+            self.bounce_vy += dy / dist * 0.04
+            mag = math.hypot(self.bounce_vx, self.bounce_vy) or 1
+            if mag > self.speed:
+                self.bounce_vx = self.bounce_vx / mag * self.speed
+                self.bounce_vy = self.bounce_vy / mag * self.speed
+            self.x += self.bounce_vx
+            self.y += self.bounce_vy
+            # Bounce off walls
+            if self.x <= self.size or self.x >= world_bounds[0] - self.size:
+                self.bounce_vx *= -1
+            if self.y <= self.size or self.y >= world_bounds[1] - self.size:
+                self.bounce_vy *= -1
+            # Spit a slow blob every ~3s when within range
+            if self.shoot_cd == 0 and dist < 320 and not self.is_splinter:
+                self._fire_single(projectiles, player.x, player.y,
+                                   dmg_mult=0.8, spd=0.07, rng=300,
+                                   col=(60, 200, 60), size=8)
+                self.shoot_cd = 110 if not self.elite else 65
+                SOUNDS.play("slime_spit", volume_scale=0.6)
+            # Elite: leave acid trail
+            if self.elite:
+                self.acid_trail.append([self.x, self.y, 80])
+                self.acid_trail = [[ax, ay, al - 1] for ax, ay, al in self.acid_trail if al > 0]
+
+        # ── DASH (Goblin) ─────────────────────────────────────────────────────
+        elif self.behaviour == "dash":
+            if self.dash_timer > 0:
+                self.x += self.dash_vx
+                self.y += self.dash_vy
+                self.dash_timer -= 1
+                self.dash_trail.append((self.x, self.y, 180))
+            else:
+                # Normal approach
+                if dist > self.size + player.size:
+                    self.x += dx / dist * self.speed
+                    self.y += dy / dist * self.speed
+                # Dash charge: warn for 18 frames then launch
+                if self.ability_cd == 18:
+                    self.warn_flash = 18
+                if self.ability_cd == 0 and dist < 380:
+                    self.dash_vx = dx / dist * self.speed * 5.2
+                    self.dash_vy = dy / dist * self.speed * 5.2
+                    self.dash_timer = 14 if not self.elite else 20
+                    self.ability_cd = random.randint(
+                        90 if not self.elite else 55,
+                        150 if not self.elite else 100)
+                    SOUNDS.play("goblin_dash", volume_scale=0.7)
+                    # Elite: drop shadow trap at current position
+                    if self.elite:
+                        self.shadow_trap.append([self.x, self.y, 180])
+            # Fade trail
+            self.dash_trail = [(tx, ty, a - 18) for tx, ty, a in self.dash_trail if a > 0]
+            # Elite: fade shadow traps
+            if self.elite:
+                self.shadow_trap = [[sx2, sy2, sl - 1] for sx2, sy2, sl in self.shadow_trap if sl > 0]
+
+        # ── TANK (Orc) ────────────────────────────────────────────────────────
+        elif self.behaviour == "tank":
+            if self.spin_timer > 0:
+                # Spin-fire: one projectile per 4 frames in a rotating sweep
+                if self.spin_timer % 4 == 0:
+                    angle = (self.spin_timer / 4) * (math.pi * 2 / 8)
+                    self._fire_single(projectiles,
+                                       self.x + math.cos(angle) * 50,
+                                       self.y + math.sin(angle) * 50,
+                                       dmg_mult=0.65, spd=0.09, rng=260,
+                                       col=(220, 80, 40), size=8)
+                self.spin_timer -= 1
+            else:
+                # Slow approach
+                if dist > self.size + player.size:
+                    self.x += dx / dist * self.speed
+                    self.y += dy / dist * self.speed
+                # Trigger rage spin below 50 % HP — once per life
+                if not self.rage_triggered and self.hp < self.max_hp * 0.5:
+                    self.rage_triggered = True
+                    self.spin_timer = 32 if not self.elite else 52
+                    self.warn_flash = 20
+                    SOUNDS.play("orc_spin", volume_scale=0.8)
+                # Slow straight shot every ~4s when close
+                if self.shoot_cd == 0 and dist < 300:
+                    if self.elite:
+                        # 3-shot cannon burst
+                        self._fire_spread(projectiles, dx, dy, 3, 0.22,
+                                          dmg_mult=0.9, spd=0.12, rng=340,
+                                          col=(255, 80, 0), size=11)
+                    else:
+                        self._fire_single(projectiles, player.x, player.y,
+                                           dmg_mult=1.0, spd=0.09, rng=300,
+                                           col=(200, 60, 30), size=10)
+                    self.shoot_cd = 140 if not self.elite else 90
+
+        # ── MAGE ─────────────────────────────────────────────────────────────
+        elif self.behaviour == "mage":
+            # Keep distance
+            preferred = 260
+            if dist < preferred - 30:
+                self.x -= dx / dist * self.speed * 0.9
+                self.y -= dy / dist * self.speed * 0.9
+            elif dist > preferred + 60:
+                self.x += dx / dist * self.speed
+                self.y += dy / dist * self.speed
+
+            # 3-way spread shot every ~2.5s (5-way for elite)
+            if self.shoot_cd == 0 and dist < 400:
+                if self.elite:
+                    self._fire_spread(projectiles, dx, dy, 5, 0.40,
+                                       dmg_mult=0.85, spd=0.14, rng=420,
+                                       col=(80, 160, 255), size=8)
+                else:
+                    self._fire_spread(projectiles, dx, dy, 3, 0.30,
+                                       dmg_mult=0.9, spd=0.11, rng=380,
+                                       col=(180, 60, 255), size=7)
+                self.shoot_cd = 100 if not self.elite else 65
+
+            # Blink
+            if self.blink_cd > 0:
+                self.blink_cd -= 1
+            if self.blink_cd == 0 and dist < 350:
+                perp_x = -dy / dist
+                perp_y =  dx / dist
+                side    = random.choice([-1, 1])
+                blink_dist = 130 if not self.elite else 200
+                nx = self.x + perp_x * side * blink_dist
+                ny = self.y + perp_y * side * blink_dist
+                nx = max(self.size, min(world_bounds[0] - self.size, nx))
+                ny = max(self.size, min(world_bounds[1] - self.size, ny))
+                self.x = nx; self.y = ny
+                self.blink_cd = random.randint(
+                    300 if not self.elite else 160,
+                    480 if not self.elite else 280)
+                SOUNDS.play("mage_blink", volume_scale=0.7)
+                # Fire from blink destination — elite fires 3-shot burst
+                if self.elite:
+                    ddx2 = player.x - self.x; ddy2 = player.y - self.y
+                    self._fire_spread(projectiles, ddx2, ddy2, 3, 0.20,
+                                       dmg_mult=1.2, spd=0.15, rng=460,
+                                       col=(120, 200, 255), size=9)
+                else:
+                    self._fire_single(projectiles, player.x, player.y,
+                                       dmg_mult=1.1, spd=0.12, rng=420,
+                                       col=(255, 100, 255), size=8)
+
+        # ── DRAGON ───────────────────────────────────────────────────────────
+        elif self.behaviour == "dragon":
+            # Slow approach, stop when in comfortable range
+            if dist > 200:
+                self.x += dx / dist * self.speed
+                self.y += dy / dist * self.speed
+
+            # Double-shot aimed burst every ~3.5s (4-way for elite)
+            if self.shoot_cd == 0 and dist < 450:
+                if self.elite:
+                    self._fire_spread(projectiles, dx, dy, 4, 0.22,
+                                       dmg_mult=1.0, spd=0.13, rng=440,
+                                       col=(255, 60, 0), size=11)
+                else:
+                    self._fire_spread(projectiles, dx, dy, 2, 0.18,
+                                       dmg_mult=1.0, spd=0.11, rng=400,
+                                       col=(255, 90, 20), size=10)
+                self.shoot_cd = 130 if not self.elite else 85
+                self.drop_orb = True
+                SOUNDS.play("dragon_orb", volume_scale=0.7)
+
+            # Occasional ring burst
+            if self.ability_cd == 0:
+                ring_count = 6 if not self.elite else 10
+                self._fire_ring(projectiles, ring_count, dmg_mult=0.6,
+                                 spd=0.08, rng=260, col=(255, 50, 0), size=7)
+                self.ability_cd = random.randint(
+                    200 if not self.elite else 130,
+                    320 if not self.elite else 220)
+
+        # Clamp to world
+        self.x = max(self.size, min(world_bounds[0] - self.size, self.x))
+        self.y = max(self.size, min(world_bounds[1] - self.size, self.y))
+
+        # Melee contact for non-ranged non-dragon (dragon uses projectiles)
+        if self.behaviour in ("bounce", "dash", "tank"):
+            if dist < self.size + player.size:
+                player.take_damage(self.dmg)
+
+    def take_damage(self, dmg):
+        self.hp         -= dmg
+        self.hurt_flash  = 8
+        if self.hp <= 0:
+            self.alive = False
+
+    def draw(self, surf, cam):
+        if not self.alive:
+            return
+        sx = int(self.x - cam[0]); sy = int(self.y - cam[1])
+
+        # Goblin dash trail
+        if self.behaviour == "dash":
+            for tx, ty, alpha in self.dash_trail:
+                trail_s = pygame.Surface((self.size * 2, self.size * 2), pygame.SRCALPHA)
+                pygame.draw.circle(trail_s, (*self.color, alpha),
+                                   (self.size, self.size), self.size)
+                surf.blit(trail_s, (int(tx - cam[0]) - self.size,
+                                     int(ty - cam[1]) - self.size))
+
+        # Warn flash ring (telegraph for dash/spin)
+        if self.warn_flash > 0:
+            warn_r = self.size + 10 + (18 - self.warn_flash)
+            ws = pygame.Surface((warn_r * 2 + 4, warn_r * 2 + 4), pygame.SRCALPHA)
+            alpha = int(200 * self.warn_flash / 18)
+            pygame.draw.circle(ws, (255, 255, 80, alpha),
+                               (warn_r + 2, warn_r + 2), warn_r, 2)
+            surf.blit(ws, (sx - warn_r - 2, sy - warn_r - 2))
+
+        # Shadow
+        pygame.draw.ellipse(surf, (10, 10, 20),
+                            (sx - self.size, sy + self.size - 4, self.size * 2, 8))
+
+        # Elite: draw acid trail (Plague Slime) or shadow traps (Shadow Stalker)
+        if self.elite:
+            if hasattr(self, 'acid_trail'):
+                for ax, ay, al in self.acid_trail:
+                    asx = int(ax - cam[0]); asy = int(ay - cam[1])
+                    alpha = max(0, min(255, int(al * 3)))
+                    ts = pygame.Surface((14, 14), pygame.SRCALPHA)
+                    pygame.draw.circle(ts, (40, 200, 40, alpha), (7, 7), 5)
+                    surf.blit(ts, (asx - 7, asy - 7))
+            if hasattr(self, 'shadow_trap'):
+                for sx2, sy2, sl in self.shadow_trap:
+                    tsx = int(sx2 - cam[0]); tsy = int(sy2 - cam[1])
+                    alpha = max(0, min(200, sl))
+                    ts = pygame.Surface((28, 28), pygame.SRCALPHA)
+                    pygame.draw.circle(ts, (120, 0, 200, alpha), (14, 14), 10, 2)
+                    pygame.draw.line(ts, (80, 0, 140, alpha), (14, 4), (14, 24), 1)
+                    pygame.draw.line(ts, (80, 0, 140, alpha), (4, 14), (24, 14), 1)
+                    surf.blit(ts, (tsx - 14, tsy - 14))
+
+        # Body
+        flash = self.hurt_flash % 4 < 2 and self.hurt_flash > 0
+        col   = WHITE if flash else self.color
+
+        # Elite glow ring — pulsing outer ring in glow colour
+        if self.elite and not flash and self.glow_col:
+            pulse_r = self.size + 4 + int(math.sin(pygame.time.get_ticks() * 0.006 + self.x) * 2)
+            gs = pygame.Surface((pulse_r * 2 + 6, pulse_r * 2 + 6), pygame.SRCALPHA)
+            pygame.draw.circle(gs, (*self.glow_col, 140),
+                               (pulse_r + 3, pulse_r + 3), pulse_r, 3)
+            surf.blit(gs, (sx - pulse_r - 3, sy - pulse_r - 3))
+
+        # Spinning orc gets a visual tell
+        if self.behaviour == "tank" and self.spin_timer > 0:
+            spin_s = pygame.Surface((self.size * 3, self.size * 3), pygame.SRCALPHA)
+            pygame.draw.circle(spin_s, (*self.color, 100),
+                               (self.size + self.size // 2,
+                                self.size + self.size // 2),
+                               self.size + 6, 3)
+            surf.blit(spin_s, (sx - self.size - self.size // 2,
+                                sy - self.size - self.size // 2))
+
+        pygame.draw.circle(surf, col, (sx, sy), self.size)
+        pygame.draw.circle(surf, WHITE, (sx, sy), self.size, 2)
+
+        # Mage inner glow dot
+        if self.behaviour == "mage":
+            pygame.draw.circle(surf, (200, 100, 255) if not self.elite else (100, 180, 255),
+                               (sx, sy), self.size // 2)
+
+        # Dragon inner flame
+        if self.behaviour == "dragon":
+            pygame.draw.circle(surf, (255, 120, 20) if not self.elite else (255, 60, 0),
+                               (sx, sy), self.size // 2)
+
+        # Elite inner pattern
+        if self.elite and not flash:
+            t = pygame.time.get_ticks() * 0.004
+            if self.behaviour == "bounce":     # Plague Slime: pulsing toxic core
+                core_r = max(3, self.size // 3 + int(math.sin(t * 2) * 2))
+                pygame.draw.circle(surf, (0, 255, 80), (sx, sy), core_r)
+            elif self.behaviour == "dash":     # Shadow Stalker: X slash marks
+                arm = self.size // 2
+                pygame.draw.line(surf, (180, 0, 255), (sx - arm, sy - arm), (sx + arm, sy + arm), 2)
+                pygame.draw.line(surf, (180, 0, 255), (sx + arm, sy - arm), (sx - arm, sy + arm), 2)
+            elif self.behaviour == "tank":     # Berserker Orc: gold spinning cross
+                for i in range(4):
+                    a = t + i * math.pi / 2
+                    ex3 = sx + int(math.cos(a) * (self.size - 6))
+                    ey3 = sy + int(math.sin(a) * (self.size - 6))
+                    pygame.draw.line(surf, (255, 180, 0), (sx, sy), (ex3, ey3), 2)
+            elif self.behaviour == "mage":     # Void Mage: rotating star
+                for i in range(6):
+                    a = t * 1.5 + i * math.pi / 3
+                    ex3 = sx + int(math.cos(a) * (self.size - 5))
+                    ey3 = sy + int(math.sin(a) * (self.size - 5))
+                    pygame.draw.circle(surf, (150, 220, 255), (ex3, ey3), 2)
+            elif self.behaviour == "dragon":   # Inferno Drake: ring of fire dots
+                for i in range(8):
+                    a = t + i * math.pi / 4
+                    ex3 = sx + int(math.cos(a) * (self.size - 8))
+                    ey3 = sy + int(math.sin(a) * (self.size - 8))
+                    pygame.draw.circle(surf, (255, 100, 0), (ex3, ey3), 3)
+
+        # Elite name tag — shown above HP bar in glow colour
+        bw = self.size * 2 + 8
+        if self.elite and self.glow_col:
+            bar_col = self.glow_col
+        else:
+            bar_col = GREEN
+        draw_bar(surf, sx - bw // 2, sy - self.size - 10, bw, 5,
+                 self.hp, self.max_hp, bar_col)
+
+# ── Fire Orb (Dragon lingering hazard) ───────────────────────────────────────
+
+class FireOrb:
+    LIFETIME = 180   # 3 seconds
+
+    def __init__(self, x, y, dmg):
+        self.x = float(x); self.y = float(y)
+        self.dmg    = dmg
+        self.life   = self.LIFETIME
+        self.radius = 18
+        self.pulse  = 0.0
+        self.hit_cd = 0   # so it doesn't damage every single frame
+
+    def update(self, player):
+        self.life   -= 1
+        self.pulse  += 0.15
+        if self.hit_cd > 0: self.hit_cd -= 1
+        if self.life <= 0:
+            return False
+        if (self.hit_cd == 0 and
+                math.hypot(player.x - self.x, player.y - self.y) < self.radius + player.size):
+            player.take_damage(self.dmg)
+            self.hit_cd = 40   # hurt every ~0.7s
+        return True
+
+    def draw(self, surf, cam):
+        sx = int(self.x - cam[0]); sy = int(self.y - cam[1])
+        t  = self.life / self.LIFETIME
+        r  = int(self.radius + math.sin(self.pulse) * 3)
+        alpha = int(180 * t)
+        s = pygame.Surface((r * 2 + 8, r * 2 + 8), pygame.SRCALPHA)
+        pygame.draw.circle(s, (255, 80, 10, alpha),  (r + 4, r + 4), r)
+        pygame.draw.circle(s, (255, 200, 50, alpha), (r + 4, r + 4), max(1, r - 5))
+        surf.blit(s, (sx - r - 4, sy - r - 4))
+
+# ── Nyxoth Fire Bomb ──────────────────────────────────────────────────────────
+
+class NyxFireBomb:
+    """
+    A large void-fire circle that burns on the ground for a few seconds.
+    In enraged mode it 'falls from the sky' with a warning shadow + drop animation.
+    """
+    LIFETIME    = 240   # 4 seconds on ground
+    FALL_FRAMES = 40    # frames of fall animation before landing
+    RADIUS      = 48    # ground burn radius
+
+    def __init__(self, x, y, dmg, falling=False):
+        self.x       = float(x); self.y = float(y)
+        self.dmg     = dmg
+        self.life    = self.LIFETIME
+        self.pulse   = 0.0
+        self.hit_cd  = 0
+        self.falling = falling
+        self.fall_t  = self.FALL_FRAMES if falling else 0   # counts down
+        self.alive   = True
+
+    def update(self, player):
+        self.pulse += 0.12
+        if self.hit_cd > 0:
+            self.hit_cd -= 1
+        if self.falling and self.fall_t > 0:
+            self.fall_t -= 1
+            return True   # still falling — no ground damage yet
+        self.life -= 1
+        if self.life <= 0:
+            self.alive = False
+            return False
+        if (self.hit_cd == 0 and
+                math.hypot(player.x - self.x, player.y - self.y) < self.RADIUS + player.size):
+            player.take_damage(self.dmg)
+            self.hit_cd = 70   # hurt every ~1.2s (was 35)
+        return True
+
+    def draw(self, surf, cam):
+        sx = int(self.x - cam[0]); sy = int(self.y - cam[1])
+
+        if self.falling and self.fall_t > 0:
+            # Warning shadow on ground + falling orb from above
+            t = 1 - self.fall_t / self.FALL_FRAMES   # 0→1 as it falls
+            # Shadow grows as bomb approaches — red tint
+            shad_r = int(self.RADIUS * t)
+            if shad_r > 2:
+                shad_s = pygame.Surface((shad_r * 2 + 4, shad_r * 2 + 4), pygame.SRCALPHA)
+                pygame.draw.circle(shad_s, (180, 0, 0, int(160 * t)),
+                                   (shad_r + 2, shad_r + 2), shad_r)
+                surf.blit(shad_s, (sx - shad_r - 2, sy - shad_r - 2))
+            # Falling orb — red/orange
+            fall_offset = int((1 - t) * 220)
+            orb_sy = sy - fall_offset
+            orb_r  = max(4, int(10 + t * (self.RADIUS - 10)))
+            os2 = pygame.Surface((orb_r * 2 + 8, orb_r * 2 + 8), pygame.SRCALPHA)
+            pygame.draw.circle(os2, (180, 0, 0, 220),   (orb_r + 4, orb_r + 4), orb_r)
+            pygame.draw.circle(os2, (255, 80, 0, 180),  (orb_r + 4, orb_r + 4),
+                               max(2, orb_r - 4))
+            surf.blit(os2, (sx - orb_r - 4, orb_sy - orb_r - 4))
+            return
+
+        # Ground burn — red/orange palette
+        ground_t = self.life / self.LIFETIME   # 1→0
+        r    = int(self.RADIUS + math.sin(self.pulse) * 4)
+        # Outer red glow
+        glow_r = r + 18
+        gs = pygame.Surface((glow_r * 2 + 4, glow_r * 2 + 4), pygame.SRCALPHA)
+        pygame.draw.circle(gs, (160, 0, 0, int(80 * ground_t)),
+                           (glow_r + 2, glow_r + 2), glow_r)
+        surf.blit(gs, (sx - glow_r - 2, sy - glow_r - 2))
+        # Core fire circle — concentric red/orange rings
+        bs = pygame.Surface((r * 2 + 8, r * 2 + 8), pygame.SRCALPHA)
+        pygame.draw.circle(bs, (120, 0, 0,   int(200 * ground_t)), (r + 4, r + 4), r)
+        pygame.draw.circle(bs, (200, 30, 0,  int(160 * ground_t)), (r + 4, r + 4),
+                           max(2, int(r * 0.75)))
+        pygame.draw.circle(bs, (255, 100, 0, int(120 * ground_t)), (r + 4, r + 4),
+                           max(2, int(r * 0.45)))
+        pygame.draw.circle(bs, (255, 220, 80, int(80 * ground_t)), (r + 4, r + 4),
+                           max(2, int(r * 0.2)))
+        surf.blit(bs, (sx - r - 4, sy - r - 4))
+        # Flickering edge sparks — red/orange
+        for i in range(6):
+            spark_a = self.pulse * 1.3 + i * math.pi / 3
+            spark_r = r + int(math.sin(self.pulse * 2 + i) * 8) + 4
+            spx = sx + int(math.cos(spark_a) * spark_r)
+            spy = sy + int(math.sin(spark_a) * spark_r)
+            pygame.draw.circle(surf, (255, 80, 0), (spx, spy), 2)
+
+
+# ── Homing Projectile (boss-only) ────────────────────────────────────────────
+
+class HomingProjectile(Projectile):
+    def __init__(self, x, y, dx, dy, dmg, col, target):
+        super().__init__(x, y, dx, dy, dmg, 0.18, 600, col, 9, owner="enemy")
+        self.target    = target
+        self.turn_rate = 0.09
+        self.age       = 0
+
+    def update(self):
+        self.age += 1
+        # Only home after a short travel time so it doesn't snap instantly
+        if self.age > 20 and self.target:
+            tx  = self.target.x - self.x
+            ty  = self.target.y - self.y
+            mag = math.hypot(tx, ty) or 1
+            tx /= mag; ty /= mag
+            cmag = math.hypot(self.vx, self.vy) or 1
+            cx   = self.vx / cmag; cy = self.vy / cmag
+            self.vx = (cx + tx * self.turn_rate) / math.hypot(cx + tx * self.turn_rate, cy + ty * self.turn_rate) * cmag
+            self.vy = (cy + ty * self.turn_rate) / math.hypot(cx + tx * self.turn_rate, cy + ty * self.turn_rate) * cmag
+        self.x    += self.vx
+        self.y    += self.vy
+        self.dist += math.hypot(self.vx, self.vy)
+        if self.dist >= self.max_dist:
+            self.alive = False
+
+# ── Boss ──────────────────────────────────────────────────────────────────────
+
+class Boss:
+    ENRAGE_THRESHOLD = 0.35   # goes enrage below 35% HP
+
+    def __init__(self, x, y, btype_idx, player_level):
+        bt = BOSS_TYPES[btype_idx]
+        self.name     = bt["name"]
+        self.title    = bt["title"]
+        self.color    = bt["color"]
+        self.size     = bt["size"]
+        self.pattern  = bt["pattern"]
+        self.proj_col = bt["proj_col"]
+
+        # Scaling: aggressive curve so bosses stay scary at high levels
+        scale          = 1 + (player_level - 1) * 0.22
+        self.max_hp    = int(bt["base_hp"] * scale)
+        self.hp        = self.max_hp
+        self.base_dmg  = int(bt["base_dmg"] * scale)
+        self.speed     = bt["base_spd"] * (1 + player_level * 0.015)
+        self.gold_drop = int(bt["gold"] * (1 + (player_level - 1) * 0.06))
+        self.xp_drop   = int(bt["xp"] * scale)
+
+        self.x = float(x); self.y = float(y)
+        self.alive      = True
+        self.hurt_flash = 0
+        self.enraged    = False
+
+        # Pattern timers / state
+        self.atk_cd      = 90
+        self.spiral_ang  = 0.0
+        self.charge_vx   = 0.0
+        self.charge_vy   = 0.0
+        self.charge_timer = 0
+        self.orbit_ang   = 0.0
+        self.orbit_dir   = random.choice([-1, 1])
+
+        # Seraphix dash state
+        self.seraph_dash_cd    = random.randint(60, 120)
+        self.seraph_dash_vx    = 0.0
+        self.seraph_dash_vy    = 0.0
+        self.seraph_dash_timer = 0
+
+        # Gorvak minion state
+        self.minions    = []   # list of GorvakMinion
+        self.summon_cd  = 120  # frames until first summon
+
+        # Shake effect on hurt
+        self.shake_x = 0; self.shake_y = 0
+        self.shake_t = 0
+
+        # Vexara phase-2 state
+        self.vex_split_done  = False   # True once the split has fired
+        self.vex_clone       = None    # reference to the clone Boss (primary only)
+        self.is_vex_clone    = False   # True if this IS the clone
+        self.vex_pulse_t     = 0       # colour pulse timer
+        self._trigger_vex_split = False  # set by take_damage, consumed by game loop
+
+        # Vexara teleport state (phase 1 only — not enraged, not clone)
+        self.vex_tp_cd       = random.randint(240, 360)  # frames until next teleport
+        self.vex_tp_warning  = 0    # countdown for pre-blink warning flash (40 frames)
+        self.vex_tp_flash    = 0    # post-blink flash countdown (20 frames)
+        self.vex_tp_old_x    = 0.0  # position before teleport (for afterimage)
+        self.vex_tp_old_y    = 0.0
+
+        # Nyxoth state
+        self.nyx_homing_cd  = random.randint(60, 100)   # cooldown between homing bursts
+        self.nyx_bomb_cd    = random.randint(180, 280)  # cooldown between firebombs
+        self.nyx_pulse_t    = 0                          # visual pulse timer
+
+        # Malachar lava/fire state
+        self.mal_fire_particles = []   # visual-only fire sparks [x, y, vx, vy, life, max_life, size]
+        self.mal_pulse_t        = 0    # lava texture pulse timer
+
+    @property
+    def dmg(self):
+        return int(self.base_dmg * (1.6 if self.enraged else 1.0))
+
+    def take_damage(self, dmg):
+        self.hp         -= dmg
+        self.hurt_flash  = 10
+        self.shake_t     = 8
+        if self.hp <= 0:
+            self.hp    = 0
+            self.alive = False
+        elif not self.enraged and self.hp / self.max_hp < self.ENRAGE_THRESHOLD:
+            self.enraged = True   # caller checks this for the announcement
+        # Vexara phase 2: split at 50% HP (primary only, once)
+        if (self.pattern == "spiral" and not self.is_vex_clone
+                and not self.vex_split_done
+                and self.hp / self.max_hp <= 0.5 and self.alive):
+            self.vex_split_done = True
+            self._trigger_vex_split = True   # flag picked up by game loop
+
+    def _fire(self, projectiles, dx, dy, dmg_mult=1.0, size=None, spd=0.12):
+        mag = math.hypot(dx, dy) or 1
+        dx /= mag; dy /= mag
+        projectiles.append(
+            Projectile(self.x, self.y, dx, dy,
+                       int(self.dmg * dmg_mult), spd, 500,
+                       self.proj_col, size or 10, owner="enemy"))
+
+    def update(self, player, projectiles, world_bounds):
+        if not self.alive:
+            return
+
+        dx   = player.x - self.x
+        dy   = player.y - self.y
+        dist = math.hypot(dx, dy)
+
+        # Shake decay
+        if self.shake_t > 0:
+            self.shake_t -= 1
+            self.shake_x  = random.randint(-4, 4) if self.shake_t > 0 else 0
+            self.shake_y  = random.randint(-4, 4) if self.shake_t > 0 else 0
+
+        speed_mult = 1.5 if self.enraged else 1.0
+        cd_mult    = 0.6 if self.enraged else 1.0   # faster attacks when enraged
+
+        # ── Pattern: charge ────────────────────────────────────────────────────
+        if self.pattern == "charge":
+            if self.charge_timer > 0:
+                self.x += self.charge_vx
+                self.y += self.charge_vy
+                self.charge_timer -= 1
+            else:
+                # Normal approach
+                if dist > self.size + 60:
+                    self.x += dx / dist * self.speed * speed_mult
+                    self.y += dy / dist * self.speed * speed_mult
+                self.atk_cd -= 1
+                if self.atk_cd <= 0:
+                    self.atk_cd = int(110 * cd_mult)
+                    if self.enraged:
+                        # Enraged: 5-way cone, faster cooldown, faster bullets
+                        self.atk_cd = int(65 * cd_mult)
+                        for off in [-0.45, -0.22, 0, 0.22, 0.45]:
+                            ang = math.atan2(dy, dx) + off
+                            projectiles.append(
+                                Projectile(self.x, self.y, math.cos(ang), math.sin(ang),
+                                           int(self.dmg), 0.34, 1400,
+                                           self.proj_col, 10, owner="enemy"))
+                    else:
+                        # Normal: 3-way cone
+                        for off in [-0.25, 0, 0.25]:
+                            ang = math.atan2(dy, dx) + off
+                            projectiles.append(
+                                Projectile(self.x, self.y, math.cos(ang), math.sin(ang),
+                                           int(self.dmg), 0.30, 1400,
+                                           self.proj_col, 10, owner="enemy"))
+                    # Charge — slightly shorter in enraged mode to avoid overrunning the player
+                    mag2           = dist or 1
+                    dash_mult      = 6.5 if self.enraged else 8.0
+                    self.charge_vx = dx / mag2 * self.speed * dash_mult
+                    self.charge_vy = dy / mag2 * self.speed * dash_mult
+                    self.charge_timer = 24
+
+        # ── Pattern: spiral ───────────────────────────────────────────────────
+        elif self.pattern == "spiral":
+            # Pulse proj_col between purple and pink for Vexara
+            self.vex_pulse_t += 1
+            pulse = math.sin(self.vex_pulse_t * 0.07) * 0.5 + 0.5  # 0..1
+            self.proj_col = lerp_color((180, 0, 255), (255, 80, 200), pulse)
+
+            if dist > self.size + 100:
+                self.x += dx / dist * self.speed * speed_mult
+                self.y += dy / dist * self.speed * speed_mult
+            self.atk_cd -= 1
+            if self.atk_cd <= 0:
+                # Phase 2: both primary and clone are always enraged-style (6 arms)
+                phase2 = self.vex_split_done or self.is_vex_clone
+                self.atk_cd = int((6 if phase2 else 8) * cd_mult)
+                arms = 6 if (self.enraged or phase2) else 4
+                for arm in range(arms):
+                    ang = self.spiral_ang + (math.pi * 2 / arms) * arm
+                    self._fire(projectiles, math.cos(ang), math.sin(ang), size=8, spd=0.19)
+                self.spiral_ang += 0.22
+
+            # ── Vexara teleport (phase 1 only: not enraged, not clone) ────────
+            if not self.enraged and not self.is_vex_clone and not self.vex_split_done:
+                # Warning phase — flash before teleporting
+                if self.vex_tp_warning > 0:
+                    self.vex_tp_warning -= 1
+                    if self.vex_tp_warning == 0:
+                        # Execute teleport — jump to within 160–260px of player
+                        self.vex_tp_old_x = self.x
+                        self.vex_tp_old_y = self.y
+                        tp_ang = random.uniform(0, math.pi * 2)
+                        tp_r   = random.randint(160, 260)
+                        nx = player.x + math.cos(tp_ang) * tp_r
+                        ny = player.y + math.sin(tp_ang) * tp_r
+                        self.x = max(self.size, min(world_bounds[0] - self.size, nx))
+                        self.y = max(self.size, min(world_bounds[1] - self.size, ny))
+                        self.vex_tp_flash = 20
+                        self.vex_tp_cd    = random.randint(300, 480)
+                        SOUNDS.play("mage_blink", volume_scale=0.9)
+                elif self.vex_tp_cd > 0:
+                    self.vex_tp_cd -= 1
+                else:
+                    # Start warning phase
+                    self.vex_tp_warning = 40
+
+            # Decay post-blink flash
+            if self.vex_tp_flash > 0:
+                self.vex_tp_flash -= 1
+
+        # ── Pattern: burst (Gorvak) ───────────────────────────────────────────
+        elif self.pattern == "burst":
+            # Remove dead minions
+            self.minions = [m for m in self.minions if m.alive]
+
+            # Movement — enraged moves noticeably faster
+            move_spd = self.speed * speed_mult * (1.6 if self.enraged else 1.0)
+            if dist > self.size + 80:
+                self.x += dx / dist * move_spd
+                self.y += dy / dist * move_spd
+
+            # Summon cooldown
+            if self.summon_cd > 0:
+                self.summon_cd -= 1
+            if self.summon_cd == 0 and len(self.minions) < 6:
+                ang = random.uniform(0, math.pi * 2)
+                r   = random.randint(100, 220)
+                mx_ = max(40, min(world_bounds[0] - 40, self.x + math.cos(ang) * r))
+                my_ = max(40, min(world_bounds[1] - 40, self.y + math.sin(ang) * r))
+                self.minions.append(GorvakMinion(mx_, my_, player.level, self))
+                self.summon_cd = random.randint(
+                    160 if not self.enraged else 100,
+                    240 if not self.enraged else 160)
+
+            # Update minions
+            for m in self.minions:
+                m.update(player, projectiles, world_bounds)
+
+            # Main burst attack — more frequent when enraged
+            self.atk_cd -= 1
+            if self.atk_cd <= 0:
+                self.atk_cd = int((180 if not self.enraged else 130) * cd_mult)
+                count = 16 if not self.enraged else 24
+                for i in range(count):
+                    ang = (math.pi * 2 / count) * i
+                    self._fire(projectiles, math.cos(ang), math.sin(ang),
+                               dmg_mult=0.85, size=12)
+
+        # ── Pattern: orbit (Seraphix) ─────────────────────────────────────────
+        elif self.pattern == "orbit":
+            # ── Dash movement ─────────────────────────────────────────────────
+            if self.seraph_dash_timer > 0:
+                self.x += self.seraph_dash_vx
+                self.y += self.seraph_dash_vy
+                self.seraph_dash_timer -= 1
+            else:
+                # Normal orbit movement around the player
+                orbit_r = 200
+                self.orbit_ang += 0.020 * self.orbit_dir * speed_mult
+                target_x = player.x + math.cos(self.orbit_ang) * orbit_r
+                target_y = player.y + math.sin(self.orbit_ang) * orbit_r
+                ox = target_x - self.x; oy = target_y - self.y
+                omag = math.hypot(ox, oy) or 1
+                self.x += ox / omag * self.speed * speed_mult * 2.2
+                self.y += oy / omag * self.speed * speed_mult * 2.2
+
+                # Dash cooldown
+                if self.seraph_dash_cd > 0:
+                    self.seraph_dash_cd -= 1
+                if self.seraph_dash_cd == 0:
+                    if self.enraged:
+                        # Enraged: dash straight at player
+                        mag2 = dist or 1
+                        self.seraph_dash_vx = dx / mag2 * self.speed * 7.0
+                        self.seraph_dash_vy = dy / mag2 * self.speed * 7.0
+                    else:
+                        # Normal: dash perpendicular (sideways) in current orbit direction
+                        perp_x = -math.sin(self.orbit_ang) * self.orbit_dir
+                        perp_y =  math.cos(self.orbit_ang) * self.orbit_dir
+                        self.seraph_dash_vx = perp_x * self.speed * 6.0
+                        self.seraph_dash_vy = perp_y * self.speed * 6.0
+                    self.seraph_dash_timer = 16
+                    self.seraph_dash_cd    = random.randint(
+                        int(75 * cd_mult), int(120 * cd_mult))
+
+            # ── Shooting ──────────────────────────────────────────────────────
+            self.atk_cd -= 1
+            if self.atk_cd <= 0:
+                self.atk_cd = int(38 * cd_mult)
+                # Base: 3-way fan toward player
+                for off in (-0.28, 0, 0.28):
+                    ang = math.atan2(dy, dx) + off
+                    self._fire(projectiles, math.cos(ang), math.sin(ang),
+                               size=10, spd=0.20)
+                if self.enraged:
+                    # Enraged: 5-way fan
+                    for off in (-0.5, -0.25, 0.25, 0.5):
+                        ang = math.atan2(dy, dx) + off
+                        self._fire(projectiles, math.cos(ang), math.sin(ang),
+                                   size=9, spd=0.20)
+
+        # ── Pattern: homing ───────────────────────────────────────────────────
+        elif self.pattern == "homing":
+            self.nyx_pulse_t += 1
+
+            if not self.enraged:
+                # Phase 1: slowly approaches player
+                if dist > self.size + 120:
+                    self.x += dx / dist * self.speed * speed_mult
+                    self.y += dy / dist * self.speed * speed_mult
+            else:
+                # Phase 2: flees from player — moves in the OPPOSITE direction (slower)
+                if dist < 400:
+                    self.x -= dx / dist * self.speed * speed_mult * 0.9
+                    self.y -= dy / dist * self.speed * speed_mult * 0.9
+
+            # ── Homing bullets / cone shots ───────────────────────────────────
+            self.nyx_homing_cd -= 1
+            if self.nyx_homing_cd <= 0:
+                self.nyx_homing_cd = int((100 if self.enraged else 140) * cd_mult)
+                if self.enraged:
+                    # Enraged: 4-way cone aimed at player, no homing
+                    base_ang = math.atan2(dy, dx)
+                    for off in (-0.45, -0.15, 0.15, 0.45):
+                        ang = base_ang + off
+                        projectiles.append(
+                            Projectile(self.x, self.y,
+                                       math.cos(ang), math.sin(ang),
+                                       self.dmg, 0.22, 600,
+                                       self.proj_col, 10, owner="enemy"))
+                else:
+                    # Normal: 1 homing bullet from each of the 4 cardinal sides
+                    for side_ang in (0, math.pi / 2, math.pi, 3 * math.pi / 2):
+                        ox = math.cos(side_ang) * self.size
+                        oy = math.sin(side_ang) * self.size
+                        fire_dx = dx / (dist or 1) + math.cos(side_ang) * 0.2
+                        fire_dy = dy / (dist or 1) + math.sin(side_ang) * 0.2
+                        mag = math.hypot(fire_dx, fire_dy) or 1
+                        h = HomingProjectile(
+                            self.x + ox, self.y + oy,
+                            fire_dx / mag, fire_dy / mag,
+                            self.dmg, self.proj_col, player)
+                        h.turn_rate = 0.09
+                        projectiles.append(h)
+
+            # ── Firebombs ──────────────────────────────────────────────────────
+            self.nyx_bomb_cd -= 1
+            if self.nyx_bomb_cd <= 0:
+                self.nyx_bomb_cd = int((100 if self.enraged else 200) * cd_mult)
+                if self.enraged:
+                    # Enraged: bombs fall close to the player (80–180px)
+                    count = random.randint(2, 4)
+                    for _ in range(count):
+                        bx = player.x + random.uniform(-180, 180)
+                        by = player.y + random.uniform(-180, 180)
+                        bx = max(60, min(world_bounds[0] - 60, bx))
+                        by = max(60, min(world_bounds[1] - 60, by))
+                        self.fire_orbs_pending = getattr(self, 'fire_orbs_pending', [])
+                        self.fire_orbs_pending.append(
+                            NyxFireBomb(bx, by, int(self.dmg * 0.3), falling=True))
+                else:
+                    # Normal: drop bomb near the player but at a safe distance (250–400px)
+                    ang = random.uniform(0, math.pi * 2)
+                    r   = random.randint(250, 400)
+                    bx  = player.x + math.cos(ang) * r
+                    by  = player.y + math.sin(ang) * r
+                    bx  = max(60, min(world_bounds[0] - 60, bx))
+                    by  = max(60, min(world_bounds[1] - 60, by))
+                    self.fire_orbs_pending = getattr(self, 'fire_orbs_pending', [])
+                    self.fire_orbs_pending.append(
+                        NyxFireBomb(bx, by, int(self.dmg * 0.3), falling=False))
+
+        # Clamp to world
+        self.x = max(self.size, min(world_bounds[0] - self.size, self.x))
+        self.y = max(self.size, min(world_bounds[1] - self.size, self.y))
+
+        # Melee contact
+        if dist < self.size + 18:
+            player.take_damage(self.dmg)
+
+        if self.hurt_flash > 0:
+            self.hurt_flash -= 1
+
+    def draw(self, surf, cam):
+        if not self.alive:
+            return
+        sx = int(self.x - cam[0]) + self.shake_x
+        sy = int(self.y - cam[1]) + self.shake_y
+
+        # Enrage aura
+        if self.enraged:
+            aura_r = int(self.size * 1.6 + math.sin(pygame.time.get_ticks() * 0.008) * 6)
+            for ai in range(4):
+                ar = aura_r - ai * 4
+                if ar > 0:
+                    ac = (max(0, self.color[0] - ai * 15),
+                          max(0, self.color[1] - ai * 15),
+                          max(0, self.color[2] - ai * 15))
+                    pygame.draw.circle(surf, ac, (sx, sy), ar, 2)
+
+        # Shadow
+        pygame.draw.ellipse(surf, (10, 10, 20),
+                            (sx - self.size, sy + self.size - 6,
+                             self.size * 2, int(self.size * 0.5)))
+
+        # Define flash here so all pattern-specific body blocks can use it
+        flash    = self.hurt_flash % 4 < 2 and self.hurt_flash > 0
+        body_col = WHITE if flash else self.color
+
+        # ── Nyxoth black hole visual ──────────────────────────────────────────
+        if self.pattern == "homing":
+            t_nyx   = pygame.time.get_ticks()
+            np_t    = math.sin(t_nyx * 0.003) * 0.5 + 0.5   # 0..1 slow pulse
+            spin_a  = t_nyx * 0.0015   # slow rotation
+
+            # Accretion disc — two counter-rotating ellipses of dots (no per-dot alloc)
+            for ring_idx in range(2):
+                ring_r   = self.size + 18 + ring_idx * 14
+                dots     = 10 + ring_idx * 4
+                spin_dir = 1 if ring_idx == 0 else -1
+                ring_ang = spin_a * spin_dir * (1 + ring_idx * 0.4)
+                disc_col = lerp_color((80, 0, 180), (200, 80, 255), np_t)
+                # Faded outer halo: draw a slightly larger circle in a darker colour
+                halo_col = (max(0,disc_col[0]//3), 0, max(0,disc_col[2]//3))
+                for di in range(dots):
+                    a    = ring_ang + (math.pi * 2 / dots) * di
+                    drx  = sx + int(math.cos(a) * ring_r)
+                    dry  = sy + int(math.sin(a) * ring_r * 0.35)
+                    dr   = max(2, 4 - ring_idx)
+                    pygame.draw.circle(surf, halo_col, (drx, dry), dr + 2)   # halo — solid dark
+                    pygame.draw.circle(surf, disc_col,  (drx, dry), dr)       # bright core
+
+            # Event horizon glow — draw concentric circles, no surface alloc
+            for gi in range(3):
+                hr = self.size + 8 + int(np_t * 6) - gi * 2
+                if hr > 0:
+                    hc = max(0, int((120 + np_t * 60) * (1 - gi * 0.3)))
+                    pygame.draw.circle(surf, (20, 0, max(0, 60 - gi * 10)), (sx, sy), hr, max(1, 3 - gi))
+
+            # Body — pure black void with a faint purple edge
+            pygame.draw.circle(surf, (0, 0, 0), (sx, sy), self.size)
+            pygame.draw.circle(surf, lerp_color((40, 0, 100), (120, 0, 200), np_t),
+                               (sx, sy), self.size, 3)
+            pygame.draw.circle(surf, lerp_color((100, 0, 200), (220, 100, 255), np_t),
+                               (sx, sy), int(self.size * 0.88), 2)
+
+            if self.enraged:
+                # Crackling energy rings — direct draw, no per-ring surface
+                for ri in range(3):
+                    er_r = self.size + 4 + ri * 8 + int(math.sin(t_nyx * 0.01 + ri) * 4)
+                    ec   = max(0, int(60 + ri * 20))
+                    ring_c = (max(0, min(255, 180 - ri * 20)), max(0, min(255, 60 - ri * 10)), 255)
+                    pygame.draw.circle(surf, ring_c, (sx, sy), er_r, 2)
+
+            # Skip the standard body draw — we drew it manually above
+            _skip_standard_body = True
+        elif self.pattern == "charge":
+            # ── Malachar lava body ────────────────────────────────────────────
+            t_mal   = pygame.time.get_ticks()
+            self.mal_pulse_t += 1
+            lp      = math.sin(self.mal_pulse_t * 0.06) * 0.5 + 0.5   # 0..1
+
+            # Outer heat glow — draw concentric circles, no alloc
+            glow_r   = self.size + 10 + int(lp * 8)
+            glow_col = lerp_color((180, 40, 0), (255, 120, 0), lp)
+            for gi in range(4):
+                gr = glow_r - gi * 3
+                if gr > self.size:
+                    gc = (max(0, glow_col[0] - gi * 20),
+                          max(0, glow_col[1] - gi * 8), 0)
+                    pygame.draw.circle(surf, gc, (sx, sy), gr, 2)
+
+            # Dark crust body
+            crust_col = lerp_color((40, 10, 0), (80, 20, 0), lp)
+            pygame.draw.circle(surf, crust_col, (sx, sy), self.size)
+
+            # Lava cracks — rotating lines of bright orange on the surface
+            for ci in range(6):
+                crack_ang = t_mal * 0.0008 + ci * (math.pi / 3)
+                crack_len = int(self.size * 0.7 + math.sin(t_mal * 0.004 + ci) * self.size * 0.2)
+                cx1 = sx + int(math.cos(crack_ang) * 4)
+                cy1 = sy + int(math.sin(crack_ang) * 4)
+                cx2 = sx + int(math.cos(crack_ang) * crack_len)
+                cy2 = sy + int(math.sin(crack_ang) * crack_len)
+                crack_col = lerp_color((200, 60, 0), (255, 200, 40), lp)
+                pygame.draw.line(surf, crack_col, (cx1, cy1), (cx2, cy2), 2)
+
+            # Bright molten core
+            core_r = int(self.size * 0.4 + lp * self.size * 0.15)
+            core_col = lerp_color((255, 120, 0), (255, 240, 80), lp)
+            pygame.draw.circle(surf, core_col, (sx, sy), core_r)
+
+            # Spawn visual fire particles (non-damaging)
+            if self.mal_pulse_t % 3 == 0:
+                for _ in range(3):
+                    ang_p = random.uniform(0, math.pi * 2)
+                    spd_p = random.uniform(1.2, 3.0)
+                    self.mal_fire_particles.append([
+                        float(sx), float(sy),
+                        math.cos(ang_p) * spd_p,
+                        math.sin(ang_p) * spd_p - random.uniform(0.5, 2.0),
+                        random.randint(12, 28),   # life
+                        random.randint(12, 28),   # max_life
+                        random.randint(3, 7),     # size
+                    ])
+
+            # Update + draw fire particles — direct draw, no per-particle surface
+            alive_parts = []
+            for fp in self.mal_fire_particles:
+                fp[0] += fp[2]; fp[1] += fp[3]
+                fp[3] += 0.08
+                fp[4] -= 1
+                if fp[4] > 0:
+                    alive_parts.append(fp)
+                    ft  = fp[4] / fp[5]
+                    fsz = max(1, int(fp[6] * ft))
+                    if ft > 0.6:
+                        fc = lerp_color((255, 200, 40), (255, 100, 0), 1 - (ft - 0.6) / 0.4)
+                    elif ft > 0.25:
+                        fc = lerp_color((255, 100, 0), (180, 30, 0), 1 - (ft - 0.25) / 0.35)
+                    else:
+                        fc = lerp_color((180, 30, 0), (60, 15, 0), 1 - ft / 0.25)
+                    # Draw solid dot — fade approximated by darkening the colour
+                    pygame.draw.circle(surf, (int(fc[0]), int(fc[1]), int(fc[2])),
+                                       (int(fp[0]), int(fp[1])), fsz)
+            self.mal_fire_particles = alive_parts
+
+            if flash:
+                pygame.draw.circle(surf, WHITE, (sx, sy), self.size)
+
+            _skip_standard_body = True
+        else:
+            _skip_standard_body = False
+
+        # Standard body (skipped for Nyxoth and Malachar which draw their own)
+        if not _skip_standard_body:
+            pygame.draw.circle(surf, body_col, (sx, sy), self.size)
+
+        # ── Seraphix wings ────────────────────────────────────────────────────
+        if self.pattern == "orbit":
+            t = pygame.time.get_ticks() // 16   # ~60fps equivalent tick
+            flap      = math.sin(t * 0.08)
+            flap_ang  = flap * 0.22
+            glow_tick = math.sin(t * 0.12) * 0.5 + 0.5
+
+            # Scale quills relative to boss size (self.size ≈ 44 for Seraphix)
+            sz = self.size
+            quill_offsets = [-0.60, -0.30, 0.0, 0.30, 0.58]
+            quill_lengths = [sz + 52, sz + 66, sz + 78, sz + 66, sz + 50]
+            quill_widths  = [5, 7, 9, 7, 5]
+            wing_col_mid  = (255, 230, 120)   # golden-white to match Seraphix colour
+            wing_col_base = (180, 120, 20)    # dark gold shadow
+
+            for side in (-1, 1):
+                base   = math.pi if side == -1 else 0.0
+                root_x = sx + int(math.cos(base) * (sz - 6))
+                root_y = sy
+
+                for qi, (qoff, qlen, qw) in enumerate(zip(quill_offsets, quill_lengths, quill_widths)):
+                    flap_bias = (2 - qi) * 0.10
+                    ang   = base + (qoff + flap_ang * flap_bias) * side
+                    tip_x = sx + int(math.cos(ang) * qlen)
+                    tip_y = sy + int(math.sin(ang) * qlen) - int(flap * 12)
+
+                    # Outer shadow quill
+                    pygame.draw.line(surf, wing_col_base,
+                                     (root_x, root_y), (tip_x, tip_y), qw + 3)
+                    # Bright mid quill
+                    pygame.draw.line(surf, wing_col_mid,
+                                     (root_x, root_y), (tip_x, tip_y), qw)
+                    # White highlight on centre quill
+                    if qi == 2:
+                        pygame.draw.line(surf, (255, 255, 220),
+                                         (root_x, root_y), (tip_x, tip_y), 3)
+
+                    # Feather barbs
+                    steps = 6
+                    for bi in range(1, steps):
+                        frac     = bi / steps
+                        bx       = int(root_x + (tip_x - root_x) * frac)
+                        by       = int(root_y + (tip_y - root_y) * frac)
+                        barb_len = int((1 - frac) * 16 + 4)
+                        perp     = ang + math.pi / 2
+                        for bsign in (-1, 1):
+                            ex_b = bx + int(math.cos(perp) * barb_len * bsign)
+                            ey_b = by + int(math.sin(perp) * barb_len * bsign)
+                            barb_a = int(160 * (1 - frac))
+                            pygame.draw.line(surf, (*wing_col_mid, barb_a),
+                                             (bx, by), (ex_b, ey_b), 1)
+
+                # Glowing tip dot on central quill
+                tip_ang = base + (quill_offsets[2] + flap_ang) * side
+                rim_x   = sx + int(math.cos(tip_ang) * (quill_lengths[2] + 6))
+                rim_y   = sy + int(math.sin(tip_ang) * quill_lengths[2]) - int(flap * 12)
+                pygame.draw.circle(surf, (255, 245, 180), (rim_x, rim_y), 4)
+
+            # Golden shimmer sparkles
+            rng_state = t // 8
+            for sp in range(8):
+                spark_seed = int(rng_state * 19 + sp * 37) & 0xFFFF
+                spark_r    = (spark_seed % 36) + sz
+                spark_ang  = (spark_seed % 628) / 100.0
+                spark_side = 1 if sp % 2 == 0 else -1
+                spx = sx + spark_side * int(math.cos(spark_ang) * spark_r)
+                spy = sy + int(math.sin(spark_ang) * spark_r * 0.55)
+                spark_alpha = ((t + sp * 7) % 30)
+                if spark_alpha < 15:
+                    sc = min(255, 180 + spark_alpha * 5)
+                    pygame.draw.circle(surf, (sc, sc, 80), (spx, spy), 2)
+
+        # ── Vexara spinning hex ring visual ──────────────────────────────────
+        if self.pattern == "spiral":
+            t     = pygame.time.get_ticks()
+            pulse = math.sin(t * 0.004) * 0.5 + 0.5   # 0..1, slow cycle
+            ring_col  = lerp_color((180, 0, 255), (255, 80, 200), pulse)
+            ring_col2 = lerp_color((255, 80, 200), (120, 0, 180), pulse)
+            spin  = t * 0.002   # rotation angle
+            spin2 = t * 0.003 + math.pi / 6   # counter-rotating second ring
+
+            # ── Teleport warning: pulsing concentric rings — no alloc ────────
+            if self.vex_tp_warning > 0:
+                warn_t = self.vex_tp_warning / 40.0   # 1→0
+                for ri in range(3):
+                    ring_r = int(self.size + 12 + ri * 14 + (1 - warn_t) * 20)
+                    bri    = max(0, int(180 * warn_t * (1 - ri * 0.25)))
+                    if bri > 8:
+                        wc = lerp_color((255, 80, 200), (255, 255, 255), 1 - warn_t)
+                        wc_dim = (max(0, min(255, int(wc[0] * bri / 180))),
+                                  max(0, min(255, int(wc[1] * bri / 180))),
+                                  max(0, min(255, int(wc[2] * bri / 180))))
+                        pygame.draw.circle(surf, wc_dim, (sx, sy), ring_r,
+                                           max(1, int(3 * warn_t)))
+                # Body flickers — override body colour to flash white/purple
+                flicker = int((1 - warn_t) * 6)
+                if flicker % 2 == 0:
+                    pygame.draw.circle(surf, (220, 160, 255), (sx, sy), self.size)
+                else:
+                    pygame.draw.circle(surf, self.color, (sx, sy), self.size)
+
+            # ── Post-blink arrival flash: expanding ring at new position ──────
+            if self.vex_tp_flash > 0:
+                flash_t = self.vex_tp_flash / 20.0   # 1→0
+                arr_r   = int(self.size + (1 - flash_t) * 60)
+                arr_c   = (min(255, int(255 * flash_t)), min(255, int(180 * flash_t)),
+                           min(255, int(255 * flash_t)))
+                for ri in range(3):
+                    if arr_r - ri > 0:
+                        pygame.draw.circle(surf, arr_c, (sx, sy), arr_r - ri, 1)
+
+                # Afterimage at old position — solid faded circle
+                old_sx = int(self.vex_tp_old_x - cam[0])
+                old_sy = int(self.vex_tp_old_y - cam[1])
+                aft_c  = (min(255, int(self.color[0] * flash_t)),
+                          min(255, int(self.color[1] * flash_t)),
+                          min(255, int(self.color[2] * flash_t)))
+                after_r = self.size + 4
+                pygame.draw.circle(surf, aft_c, (old_sx, old_sy), after_r)
+                pygame.draw.circle(surf, (min(255, int(200 * flash_t)),) * 3,
+                                   (old_sx, old_sy), after_r, 2)
+
+            # Outer spinning hex dots — solid draws with a halo approximated by a larger dim circle
+            for i in range(6):
+                a = spin + (math.pi * 2 / 6) * i
+                rx = sx + int(math.cos(a) * (self.size + 10))
+                ry = sy + int(math.sin(a) * (self.size + 10))
+                dot_r = int(4 + math.sin(t * 0.006 + i) * 2)
+                halo_c = (max(0, ring_col[0] // 3), 0, max(0, ring_col[2] // 3))
+                pygame.draw.circle(surf, halo_c,  (rx, ry), dot_r + 3)
+                pygame.draw.circle(surf, ring_col, (rx, ry), dot_r)
+
+            # Inner counter-rotating triangle dots
+            for i in range(3):
+                a = spin2 + (math.pi * 2 / 3) * i
+                rx = sx + int(math.cos(a) * int(self.size * 0.6))
+                ry = sy + int(math.sin(a) * int(self.size * 0.6))
+                pygame.draw.circle(surf, ring_col2, (rx, ry), 3)
+
+            # Pulsing outer glow ring — solid concentric rings, no Surface alloc
+            glow_r = self.size + 6 + int(pulse * 8)
+            for gi in range(3):
+                gr = glow_r - gi
+                if gr > 0:
+                    ga = max(0, int((40 + pulse * 40) * (1 - gi * 0.35)))
+                    gc = (max(0, ring_col[0] - gi * 15), 0, max(0, ring_col[2] - gi * 15))
+                    if ga > 6:
+                        pygame.draw.circle(surf, gc, (sx, sy), gr, 2)
+
+        # Inner ring + enraged pulse + outline (skipped for Nyxoth)
+        if not _skip_standard_body:
+            inner_col = lerp_color(self.color, WHITE, 0.4)
+            pygame.draw.circle(surf, inner_col, (sx, sy), int(self.size * 0.55))
+            if self.enraged:
+                pulse_r = int(self.size * 0.3 + math.sin(pygame.time.get_ticks() * 0.012) * 4)
+                pygame.draw.circle(surf, WHITE, (sx, sy), pulse_r)
+            pygame.draw.circle(surf, WHITE, (sx, sy), self.size, 3)
+            pygame.draw.circle(surf, self.color, (sx, sy), self.size + 4, 2)
+
+        # Name plate above boss — font cached on first use
+        if not hasattr(self, '_name_font'):
+            self._name_font = pygame.font.SysFont("consolas", 13, bold=True)
+        font_s  = self._name_font
+        name_s  = font_s.render(self.name, True, WHITE)
+        title_s = font_s.render(f"[ {self.title} ]", True, self.color)
+        nx = sx - name_s.get_width() // 2
+        ny = sy - self.size - 32
+
+        bg_w = max(name_s.get_width(), title_s.get_width()) + 12
+        bg = pygame.Surface((bg_w, 34), pygame.SRCALPHA)
+        bg.fill((0, 0, 0, 160))
+        surf.blit(bg, (sx - bg_w // 2, ny - 2))
+        surf.blit(title_s, (sx - title_s.get_width() // 2, ny))
+        surf.blit(name_s,  (sx - name_s.get_width()  // 2, ny + 16))
+
+        # Wide HP bar
+        bw = self.size * 3
+        draw_bar(surf, sx - bw // 2, sy - self.size - 44, bw, 8,
+                 self.hp, self.max_hp,
+                 (220, 40, 40) if self.enraged else (200, 60, 200))
+
+# ── Gorvak Minion ─────────────────────────────────────────────────────────────
+
+class GorvakMinion:
+    """
+    A unique minion summoned by Gorvak Ironhide.
+    Behaviour: teleports periodically near the boss (normal) or near the player
+    (enraged), then fires a 3-way cone shot toward the player.
+    """
+    COLOR     = (100, 200, 100)
+    SIZE      = 18
+    MAX_HP    = 120   # scaled by player level on creation
+
+    def __init__(self, x, y, player_level, boss):
+        self.x = float(x); self.y = float(y)
+        scale      = 1 + (player_level - 1) * 0.10
+        self.max_hp = int(self.MAX_HP * scale)
+        self.hp     = self.max_hp
+        self.dmg    = int(14 * scale)
+        self.boss   = boss   # reference for teleport anchor
+        self.alive  = True
+        self.hurt_flash  = 0
+        self.shoot_cd    = random.randint(30, 70)
+        self.teleport_cd = random.randint(80, 150)
+        # Blink flash (visual telegraph before teleport)
+        self.blink_flash  = 0
+        self.BLINK_WARNING = 20   # frames of telegraph before teleport fires
+
+    def update(self, player, projectiles, world_bounds):
+        if not self.alive:
+            return
+
+        if self.hurt_flash  > 0: self.hurt_flash  -= 1
+
+        # ── Shoot ─────────────────────────────────────────────────────────────
+        dx = player.x - self.x; dy = player.y - self.y
+        dist = math.hypot(dx, dy) or 1
+        if self.shoot_cd > 0:
+            self.shoot_cd -= 1
+        if self.shoot_cd == 0 and dist < 450:
+            base_a = math.atan2(dy, dx)
+            for off in (-0.28, 0, 0.28):
+                a = base_a + off
+                projectiles.append(Projectile(
+                    self.x, self.y, math.cos(a), math.sin(a),
+                    self.dmg, 0.14, 420,
+                    (120, 220, 120), 7, owner="enemy"))
+            self.shoot_cd = 70 if not self.boss.enraged else 45
+
+        # ── Teleport ──────────────────────────────────────────────────────────
+        if self.blink_flash > 0:
+            self.blink_flash -= 1
+            if self.blink_flash == 0:
+                # Actually teleport
+                if self.boss.enraged:
+                    # Closer to player
+                    ang = random.uniform(0, math.pi * 2)
+                    r   = random.randint(120, 220)
+                    nx  = player.x + math.cos(ang) * r
+                    ny  = player.y + math.sin(ang) * r
+                else:
+                    # Near boss
+                    ang = random.uniform(0, math.pi * 2)
+                    r   = random.randint(80, 200)
+                    nx  = self.boss.x + math.cos(ang) * r
+                    ny  = self.boss.y + math.sin(ang) * r
+                self.x = max(self.SIZE, min(world_bounds[0] - self.SIZE, nx))
+                self.y = max(self.SIZE, min(world_bounds[1] - self.SIZE, ny))
+                self.teleport_cd = random.randint(
+                    60 if self.boss.enraged else 90,
+                    120 if self.boss.enraged else 160)
+        else:
+            if self.teleport_cd > 0:
+                self.teleport_cd -= 1
+            if self.teleport_cd == 0:
+                self.blink_flash = self.BLINK_WARNING
+
+    def take_damage(self, dmg):
+        self.hp -= dmg
+        self.hurt_flash = 8
+        if self.hp <= 0:
+            self.alive = False
+
+    def draw(self, surf, cam):
+        if not self.alive:
+            return
+        sx = int(self.x - cam[0]); sy = int(self.y - cam[1])
+
+        # Telegraph blink before teleport
+        if self.blink_flash > 0:
+            t = self.blink_flash / self.BLINK_WARNING
+            alpha = int(180 * t)
+            warn_r = self.SIZE + 10 + int((1 - t) * 20)
+            ws = pygame.Surface((warn_r * 2 + 4, warn_r * 2 + 4), pygame.SRCALPHA)
+            pygame.draw.circle(ws, (150, 255, 150, alpha),
+                               (warn_r + 2, warn_r + 2), warn_r, 2)
+            surf.blit(ws, (sx - warn_r - 2, sy - warn_r - 2))
+
+        # Shadow
+        pygame.draw.ellipse(surf, (10, 10, 20),
+                            (sx - self.SIZE, sy + self.SIZE - 4, self.SIZE * 2, 8))
+        # Body — flash white on hurt
+        col = WHITE if self.hurt_flash % 4 < 2 and self.hurt_flash > 0 else self.COLOR
+        pygame.draw.circle(surf, col,   (sx, sy), self.SIZE)
+        pygame.draw.circle(surf, WHITE, (sx, sy), self.SIZE, 2)
+        # Inner rune dot
+        pygame.draw.circle(surf, (180, 255, 180), (sx, sy), self.SIZE // 2)
+        # HP bar
+        bw = self.SIZE * 2 + 8
+        draw_bar(surf, sx - bw // 2, sy - self.SIZE - 10, bw, 5,
+                 self.hp, self.max_hp, (80, 220, 80))
+
+
+# ── Boss Intro Cinematic ──────────────────────────────────────────────────────
+
+class BossIntro:
+    """
+    6-second boss spawn cinematic.
+    Phases (all in frames at 60 fps):
+      0-30   : fast dim — world darkens
+      30-60  : boss materialises (scale 0 → 1) + first shockwave ring
+      60-120 : 3 staggered shockwave pulses + ground crack lines
+      120-240: name card slams down, holds
+      240-300: fade out — darkness lifts, boss becomes active
+    Total: 300 frames = 5 seconds
+    """
+    TOTAL   = 300
+    DARK_IN = 30
+    DARK_OUT_START = 240
+
+    def __init__(self, boss, fonts):
+        self.boss   = boss
+        self.fonts  = fonts
+        self.frame  = 0
+        self.done   = False
+
+        # Pre-generate crack lines radiating from boss centre
+        self.cracks = []
+        for _ in range(14):
+            ang    = random.uniform(0, math.pi * 2)
+            length = random.randint(60, 180)
+            segs   = random.randint(3, 6)
+            pts    = [(boss.x, boss.y)]
+            cx, cy = boss.x, boss.y
+            for s in range(segs):
+                cx += math.cos(ang + random.uniform(-0.4, 0.4)) * (length / segs)
+                cy += math.sin(ang + random.uniform(-0.4, 0.4)) * (length / segs)
+                pts.append((cx, cy))
+            self.cracks.append(pts)
+
+        self.rings = [
+            (30,  boss.color),
+            (60,  WHITE),
+            (90,  boss.color),
+            (115, (255, 255, 100)),
+        ]
+
+        # Pre-allocate reusable surfaces — allocated once, reused every frame
+        self._dark   = pygame.Surface((SW, SH), pygame.SRCALPHA)
+        self._shared = pygame.Surface((SW, SH), pygame.SRCALPHA)  # cracks + rings
+        # Pre-render the name card (it never changes content, only alpha/position)
+        name_s  = fonts["huge"].render(boss.name,  True, WHITE)
+        title_s = fonts["large"].render(f"[ {boss.title} ]", True, boss.color)
+        cw = max(name_s.get_width(), title_s.get_width()) + 60
+        ch = 110
+        self._card      = pygame.Surface((cw, ch), pygame.SRCALPHA)
+        self._card_cw   = cw
+        self._card_ch   = ch
+        self._name_s    = name_s
+        self._title_s   = title_s
+        # Pre-render opaque card background once — we'll set_alpha on the whole card
+        self._card_bg   = pygame.Surface((cw, ch), pygame.SRCALPHA)
+        self._card_bg.fill((0, 0, 0, 200))
+        pygame.draw.rect(self._card_bg, (*boss.color, 220),
+                         (0, 0, cw, ch), 3, border_radius=12)
+
+    def update(self):
+        self.frame += 1
+        if self.frame == 30:
+            SOUNDS.play("boss_spawn")
+        if self.frame >= self.TOTAL:
+            self.done = True
+
+    @property
+    def active(self):
+        return not self.done
+
+    def draw(self, surf, cam, hud_draw_fn):
+        f   = self.frame
+        bsx = int(self.boss.x - cam[0])
+        bsy = int(self.boss.y - cam[1])
+
+        # ── Low quality: simple dark overlay + name card only ─────────────────
+        if GAME_SETTINGS.low:
+            dark_alpha = 160 if f < self.DARK_OUT_START else max(
+                0, int(160 * (1 - (f - self.DARK_OUT_START) /
+                              (self.TOTAL - self.DARK_OUT_START))))
+            self._dark.fill((0, 0, 0, dark_alpha))
+            surf.blit(self._dark, (0, 0))
+            if f >= 30:
+                scale_t  = min(1.0, (f - 30) / 60)
+                cur_size = max(1, int(self.boss.size * scale_t))
+                pygame.draw.circle(surf, self.boss.color, (bsx, bsy), cur_size)
+                pygame.draw.circle(surf, WHITE, (bsx, bsy), cur_size, 2)
+            if 120 <= f < self.DARK_OUT_START:
+                self._draw_card(surf, f)
+            hud_draw_fn()
+            return
+
+        # ── High quality (full cinematic) ─────────────────────────────────────
+        if f < self.DARK_IN:
+            dark_alpha = int(150 * f / self.DARK_IN)
+        elif f < self.DARK_OUT_START:
+            dark_alpha = 150
+        else:
+            t = (f - self.DARK_OUT_START) / (self.TOTAL - self.DARK_OUT_START)
+            dark_alpha = int(150 * (1 - t))
+
+        # Dark overlay — reuse pre-allocated surface
+        self._dark.fill((0, 0, 0, dark_alpha))
+        surf.blit(self._dark, (0, 0))
+
+        # ── Shockwave rings — direct draw, no per-ring surface ────────────────
+        for start, col in self.rings:
+            age = f - start
+            if age < 0 or age > 50:
+                continue
+            t     = age / 50
+            r     = int(20 + t * 320)
+            width = max(2, int(8 * (1 - t)))
+            # Approximate alpha fade by blending colour toward black
+            fade  = 1 - t
+            rc = (max(0, int(col[0] * fade)),
+                  max(0, int(col[1] * fade)),
+                  max(0, int(col[2] * fade)))
+            if r > 0:
+                pygame.draw.circle(surf, rc, (bsx, bsy), r, width)
+
+        # ── Ground crack lines — all batched onto one shared surface ──────────
+        if 30 <= f:
+            crack_t    = min(1.0, (f - 30) / 40)
+            fade_t     = 1.0 if f < self.DARK_OUT_START else max(
+                0.0, 1 - (f - self.DARK_OUT_START) / (self.TOTAL - self.DARK_OUT_START))
+            alpha      = int(200 * fade_t)
+            crack_col  = lerp_color(self.boss.color, (255, 200, 50), 0.4)
+            draw_col   = (max(0, int(crack_col[0] * fade_t)),
+                          max(0, int(crack_col[1] * fade_t)),
+                          max(0, int(crack_col[2] * fade_t)))
+            if alpha > 4:
+                self._shared.fill((0, 0, 0, 0))
+                for pts in self.cracks:
+                    visible    = max(2, int(len(pts) * crack_t))
+                    screen_pts = [(int(px - cam[0]), int(py - cam[1]))
+                                  for px, py in pts[:visible]]
+                    if len(screen_pts) >= 2:
+                        pygame.draw.lines(self._shared, (*draw_col, alpha),
+                                          False, screen_pts, 2)
+                surf.blit(self._shared, (0, 0))
+
+        # ── Boss materialise — direct draws, no glow surface ─────────────────
+        if 30 <= f <= 90:
+            scale_t  = (f - 30) / 60
+            cur_size = int(self.boss.size * scale_t)
+            if cur_size > 0:
+                pulse  = int(30 * math.sin(f * 0.3))
+                glow_r = max(1, cur_size + 20 + pulse)
+                # Glow: concentric rings instead of alpha surface
+                for gi in range(4):
+                    gr = glow_r - gi * 4
+                    if gr > cur_size:
+                        gc = (max(0, self.boss.color[0] - gi * 20),
+                              max(0, self.boss.color[1] - gi * 20),
+                              max(0, self.boss.color[2] - gi * 20))
+                        pygame.draw.circle(surf, gc, (bsx, bsy), gr, 2)
+                pygame.draw.circle(surf, self.boss.color, (bsx, bsy), cur_size)
+                pygame.draw.circle(surf, WHITE,            (bsx, bsy), cur_size, 3)
+        elif f > 90:
+            pulse      = int(12 * math.sin(f * 0.15))
+            glow_r     = max(1, self.boss.size + 14 + pulse)
+            fade_alpha = 90
+            if f >= self.DARK_OUT_START:
+                fade_alpha = max(0, int(90 * (1 - (f - self.DARK_OUT_START) /
+                                              (self.TOTAL - self.DARK_OUT_START))))
+            if fade_alpha > 8:
+                for gi in range(3):
+                    gr = glow_r - gi * 5
+                    if gr > 0:
+                        gc = (max(0, self.boss.color[0] - gi * 25),
+                              max(0, self.boss.color[1] - gi * 25),
+                              max(0, self.boss.color[2] - gi * 25))
+                        pygame.draw.circle(surf, gc, (bsx, bsy), gr, 2)
+
+        # ── Name card ─────────────────────────────────────────────────────────
+        if 120 <= f < self.DARK_OUT_START:
+            self._draw_card(surf, f)
+
+        hud_draw_fn()
+
+    def _draw_card(self, surf, f):
+        card_age = f - 120
+        slam_t   = min(1.0, card_age / 8)
+        card_y   = int(SH // 2 - 80 + (1 - slam_t) * (-160))
+        alpha    = min(255, card_age * 20)
+        cw, ch   = self._card_cw, self._card_ch
+        # Blit pre-rendered card background then set alpha
+        self._card.fill((0, 0, 0, 0))
+        tmp_bg = self._card_bg.copy()
+        tmp_bg.set_alpha(alpha)
+        self._card.blit(tmp_bg, (0, 0))
+        surf.blit(self._card, (SW // 2 - cw // 2, card_y))
+        self._name_s.set_alpha(alpha)
+        self._title_s.set_alpha(alpha)
+        surf.blit(self._name_s,  (SW // 2 - self._name_s.get_width()  // 2, card_y + 18))
+        surf.blit(self._title_s, (SW // 2 - self._title_s.get_width() // 2, card_y + 66))
+
+
+def draw_token_coin(surf, cx, cy, r=8):
+    """Draw a small gold token coin icon centred at (cx, cy) with radius r."""
+    pygame.draw.circle(surf, (200, 150, 0),  (cx, cy), r)
+    pygame.draw.circle(surf, (255, 200, 40), (cx, cy), r - 1)
+    pygame.draw.circle(surf, (255, 230, 100),(cx, cy), max(1, r - 3))
+    pygame.draw.circle(surf, (180, 130, 0),  (cx, cy), r, 1)
+
+
+def _draw_cosmetic_preview(surf, pattern, preview_col, cx, cy, r):
+    """Draw a small preview circle of a cosmetic pattern."""
+    pygame.draw.circle(surf, preview_col, (cx, cy), r)
+    if pattern == "fire":
+        pygame.draw.circle(surf, (255, 160, 20), (cx, cy), r - 4)
+        pygame.draw.circle(surf, (255, 240, 80), (cx, cy - 2), max(2, r - 8))
+    elif pattern == "frost":
+        for i in range(6):
+            a = math.pi / 3 * i
+            pygame.draw.line(surf, (200, 240, 255),
+                             (cx, cy),
+                             (cx + int(math.cos(a) * (r - 2)),
+                              cy + int(math.sin(a) * (r - 2))), 1)
+        pygame.draw.circle(surf, (200, 240, 255), (cx, cy), r // 2)
+    elif pattern == "void":
+        pygame.draw.circle(surf, (140, 0, 220), (cx, cy), r - 4, 2)
+        pygame.draw.circle(surf, (60, 0, 100), (cx, cy), r // 3)
+    elif pattern == "gold":
+        pygame.draw.circle(surf, (255, 215, 0), (cx, cy), r, 3)
+        pygame.draw.circle(surf, (255, 240, 100), (cx, cy), r // 2)
+    elif pattern == "storm":
+        for i in range(4):
+            a = math.pi / 2 * i
+            lx = cx + int(math.cos(a) * (r - 3))
+            ly = cy + int(math.sin(a) * (r - 3))
+            pygame.draw.circle(surf, (200, 230, 255), (lx, ly), 2)
+        pygame.draw.circle(surf, (150, 200, 255), (cx, cy), r // 3)
+    elif pattern == "wings":
+        pygame.draw.circle(surf, (160, 130, 210), (cx, cy), r)
+        pygame.draw.circle(surf, (220, 200, 255), (cx, cy), r // 2)
+        for side in (-1, 1):
+            base = math.pi if side == -1 else 0.0
+            root_x = cx + side * (r - 2)
+            for qi, (qoff, qlen) in enumerate(zip([-0.4, 0.0, 0.4],
+                                                   [r + 8, r + 11, r + 8])):
+                ang = base + qoff * side
+                tip_x = cx + int(math.cos(ang) * qlen)
+                tip_y = cy + int(math.sin(ang) * qlen)
+                pygame.draw.line(surf, (100, 60, 180), (root_x, cy), (tip_x, tip_y), 3)
+                pygame.draw.line(surf, (210, 185, 255), (root_x, cy), (tip_x, tip_y), 1)
+    elif pattern == "blackhole":
+        # Outer accretion disc dots
+        for i in range(8):
+            a   = (math.pi * 2 / 8) * i
+            drx = cx + int(math.cos(a) * (r + 4))
+            dry = cy + int(math.sin(a) * (r + 4) * 0.38)
+            pygame.draw.circle(surf, (140, 40, 220), (drx, dry), 2)
+        # Black void
+        pygame.draw.circle(surf, (0, 0, 0), (cx, cy), r)
+        # Gravitational lens ring
+        pygame.draw.circle(surf, (100, 0, 180), (cx, cy), r, 2)
+        pygame.draw.circle(surf, (180, 60, 255), (cx, cy), int(r * 0.82), 1)
+    pygame.draw.circle(surf, WHITE, (cx, cy), r, 1)
+
+
+# ── Shop ──────────────────────────────────────────────────────────────────────
+
+class Shop:
+    PAGE_WEAPONS  = 0
+    PAGE_TOKENS   = 1
+
+    def __init__(self):
+        self.open      = False
+        self.selected  = 0
+        self.page      = self.PAGE_WEAPONS
+        self.cosm_page = 0   # which page of cosmetics is shown (4 per page)
+        self.weap_page = 0   # which page of weapons is shown (7 per page)
+
+    def toggle(self):
+        self.open = not self.open
+        if self.open:
+            self.page      = self.PAGE_WEAPONS
+            self.selected  = 0
+            self.cosm_page = 0
+            self.weap_page = 0
+
+    def draw(self, surf, player, fonts):
+        if not self.open:
+            return
+        overlay = pygame.Surface((SW, SH), pygame.SRCALPHA)
+        overlay.fill((0, 0, 0, 170))
+        surf.blit(overlay, (0, 0))
+        pw, ph = 700, 680
+        px, py = SW // 2 - pw // 2, SH // 2 - ph // 2
+        pygame.draw.rect(surf, PANEL, (px, py, pw, ph), border_radius=12)
+        pygame.draw.rect(surf, CYAN,  (px, py, pw, ph), 2,  border_radius=12)
+
+        # ── Tab headers (2 tabs) ──────────────────────────────────────────────
+        tab_w2 = pw // 2
+        for ti, (tlabel, tcol, tpage) in enumerate([
+            ("Weapons",     CYAN,           self.PAGE_WEAPONS),
+            ("Token Shop",  (255, 200, 60), self.PAGE_TOKENS),
+        ]):
+            tx     = px + ti * tab_w2
+            active = (tpage == self.page)
+            tab_bg = lerp_color(PANEL, tcol, 0.18 if active else 0.04)
+            pygame.draw.rect(surf, tab_bg, (tx, py, tab_w2, 48),
+                             border_radius=10 if ti == 0 else 0)
+            pygame.draw.rect(surf, tcol if active else GRAY,
+                             (tx, py, tab_w2, 48), 2 if active else 1,
+                             border_radius=10 if ti == 0 else 0)
+            ts = fonts["small"].render(tlabel, True, tcol if active else GRAY)
+            label_x = tx + tab_w2 // 2 - ts.get_width() // 2
+            surf.blit(ts, (label_x, py + 16))
+            icon_cx = label_x - 14; icon_cy = py + 24
+            if ti == 0:
+                sword_col = tcol if active else GRAY
+                pygame.draw.line(surf, sword_col, (icon_cx, icon_cy - 8), (icon_cx, icon_cy + 8), 2)
+                pygame.draw.line(surf, sword_col, (icon_cx - 5, icon_cy - 2), (icon_cx + 5, icon_cy - 2), 2)
+                pygame.draw.circle(surf, sword_col, (icon_cx, icon_cy + 8), 3)
+            else:
+                draw_token_coin(surf, icon_cx, icon_cy, 7 if active else 6)
+
+        # Divider below tabs
+        pygame.draw.line(surf, CYAN, (px, py + 48), (px + pw, py + 48), 1)
+
+        # Currency bar — gold left, token coin + count right
+        surf.blit(fonts["small"].render(f"Gold: {player.gold}", True, YELLOW),
+                  (px + 20, py + 56))
+        draw_token_coin(surf, px + pw - 110, py + 63, 7)
+        tok_s = fonts["small"].render(f"{TOKENS.total} Tokens", True, (255, 200, 60))
+        surf.blit(tok_s, (px + pw - 95, py + 56))
+
+        if self.page == self.PAGE_WEAPONS:
+            self._draw_weapons(surf, player, fonts, px, py, pw, ph)
+        else:
+            self._draw_tokens(surf, player, fonts, px, py, pw, ph)
+
+    def _draw_weapons(self, surf, player, fonts, px, py, pw, ph):
+        COR_COL   = (180, 0, 220)
+        ITEMS_PER = 7
+        cwc       = getattr(player, "corruption_waves_cleared", 0)
+
+        # Build unified list: regular weapons first (idx 0-8), then special (idx 1000+)
+        all_weapons = [(i, w, False) for i, w in enumerate(WEAPONS)]
+        all_weapons += [(1000 + i, w, True) for i, w in enumerate(SPECIAL_WEAPONS)]
+
+        total_pages = max(1, math.ceil(len(all_weapons) / ITEMS_PER))
+        self.weap_page = max(0, min(self.weap_page, total_pages - 1))
+        page_start = self.weap_page * ITEMS_PER
+        page_items = all_weapons[page_start : page_start + ITEMS_PER]
+
+        # Page indicator
+        page_lbl = fonts["tiny"].render(
+            f"Page {self.weap_page + 1} / {total_pages}", True, GRAY)
+        surf.blit(page_lbl, (px + pw // 2 - page_lbl.get_width() // 2, py + 72))
+
+        row_h   = 56
+        rows_top = py + 90
+        self._weap_rects = {}
+
+        for slot, (widx, w, is_special) in enumerate(page_items):
+            row_y      = rows_top + slot * row_h
+            owned      = widx in player.owned_weapons
+            equipped   = widx == player.weapon_idx
+            can_afford = player.gold >= w["cost"]
+            meets_lvl  = player.level >= w["req_lvl"]
+            req_cw     = w.get("unlock_value", 0) if is_special else 0
+            unlocked   = cwc >= req_cw
+            cursor     = (widx == self.selected)
+
+            if equipped:   bg_col = (50, 20, 60) if is_special else (40, 60, 40)
+            elif cursor:   bg_col = (45, 15, 55) if is_special else (50, 50, 70)
+            else:          bg_col = (30, 10, 44) if is_special else (35, 35, 52)
+            row_rect = pygame.Rect(px + 16, row_y, pw - 32, row_h - 4)
+            pygame.draw.rect(surf, bg_col,   row_rect, border_radius=8)
+            if is_special:
+                border_col = (255, 60, 220) if equipped else ((255, 150, 255) if cursor else (80, 0, 120))
+            else:
+                border_col = YELLOW if cursor else (CYAN if equipped else GRAY)
+            pygame.draw.rect(surf, border_col, row_rect, 2 if cursor or equipped else 1, border_radius=8)
+
+            # Colour dot (with corruption glow for special)
+            dot_x = px + 40; dot_y = row_y + (row_h - 4) // 2
+            pygame.draw.circle(surf, w["color"], (dot_x, dot_y), 12)
+            if is_special:
+                gs2 = pygame.Surface((30, 30), pygame.SRCALPHA)
+                pygame.draw.circle(gs2, (180, 0, 220, 70), (15, 15), 15)
+                surf.blit(gs2, (dot_x - 15, dot_y - 15))
+
+            # Name + stats
+            name_col = WHITE if (meets_lvl and unlocked) else (GRAY if not meets_lvl else (160, 80, 180))
+            surf.blit(fonts["med"].render(w["name"], True, name_col), (px + 62, row_y + 4))
+            surf.blit(fonts["small"].render(
+                f"DMG:{w['damage']}  SPD:{w['speed']:.2f}  RNG:{w['range']}  {w.get('desc', '')}",
+                True, (160, 160, 180)), (px + 62, row_y + 26))
+
+            # Right-side: level req + action
+            lvl_x = px + pw - 160
+            if not unlocked and is_special:
+                hl = fonts["tiny"].render(w.get("unlock_hint", ""), True, (180, 80, 220))
+                surf.blit(hl, (px + pw - hl.get_width() - 16, row_y + 6))
+                pt = fonts["small"].render(f"{cwc}/{req_cw}", True, (180, 80, 220))
+                surf.blit(pt, (px + pw - pt.get_width() - 16, row_y + 26))
+            elif equipped:
+                surf.blit(fonts["small"].render("Equipped", True, (80, 220, 80) if not is_special else (180, 80, 255)),
+                          (lvl_x, row_y + 14))
+            elif owned:
+                surf.blit(fonts["small"].render("[E] Equip", True, CYAN if not is_special else (140, 100, 255)),
+                          (lvl_x, row_y + 14))
+            elif not meets_lvl:
+                surf.blit(fonts["small"].render(f"Req Lvl {w['req_lvl']}", True, RED), (lvl_x, row_y + 4))
+                surf.blit(fonts["tiny"].render("LOCKED", True, RED), (lvl_x, row_y + 26))
+            else:
+                c_col = (255, 180, 255) if is_special else YELLOW
+                if not can_afford: c_col = RED
+                surf.blit(fonts["med"].render(f"{w['cost']}g", True, c_col), (lvl_x, row_y + 4))
+                surf.blit(fonts["small"].render(f"Req Lvl {w['req_lvl']}", True, GREEN), (lvl_x - 40, row_y + 26))
+                if can_afford:
+                    surf.blit(fonts["small"].render("[B] Buy", True, (80, 220, 80) if not is_special else (180, 80, 255)),
+                              (px + pw - 100, row_y + 26))
+
+            self._weap_rects[slot] = (row_rect, widx, w, is_special, owned, equipped)
+
+        # Prev / Next page buttons
+        nav_y    = rows_top + ITEMS_PER * row_h + 4
+        btn_w    = 110; btn_h = 30
+        prev_rect = pygame.Rect(px + 16,             nav_y, btn_w, btn_h)
+        next_rect = pygame.Rect(px + pw - 16 - btn_w, nav_y, btn_w, btn_h)
+        for rect, label, enabled in [
+            (prev_rect, "◄ Prev", self.weap_page > 0),
+            (next_rect, "Next ►", self.weap_page < total_pages - 1),
+        ]:
+            col = CYAN if enabled else (50, 50, 70)
+            bg  = lerp_color(PANEL, col, 0.15) if enabled else PANEL
+            pygame.draw.rect(surf, bg,  rect, border_radius=7)
+            pygame.draw.rect(surf, col, rect, 1, border_radius=7)
+            lbl = fonts["small"].render(label, True, col)
+            surf.blit(lbl, (rect.centerx - lbl.get_width() // 2,
+                            rect.centery - lbl.get_height() // 2))
+        self._weap_prev_rect = prev_rect if self.weap_page > 0 else None
+        self._weap_next_rect = next_rect if self.weap_page < total_pages - 1 else None
+
+        # Heal button
+        heal_row_y = py + ph - 68
+        can_heal   = player.gold >= 250 and player.hp < player.max_hp
+        pygame.draw.rect(surf, (40, 60, 40) if can_heal else (40, 35, 35),
+                         (px + 16, heal_row_y, pw - 32, 34), border_radius=8)
+        pygame.draw.rect(surf, (80, 200, 80) if can_heal else (80, 60, 60),
+                         (px + 16, heal_row_y, pw - 32, 34), 1, border_radius=8)
+        pygame.draw.circle(surf, (200, 60, 60), (px + 40, heal_row_y + 17), 8)
+        heal_lbl = fonts["small"].render("Heal  +10 HP  -  250g", True,
+                                         (80, 220, 80) if can_heal else (100, 80, 80))
+        surf.blit(heal_lbl, (px + 58, heal_row_y + heal_lbl.get_height() // 2 - 1))
+        if not can_heal:
+            reason = "Not enough gold" if player.gold < 1000 else "HP is full"
+            rs = fonts["tiny"].render(reason, True, (120, 80, 80))
+            surf.blit(rs, (px + pw - rs.get_width() - 20, heal_row_y + 10))
+        else:
+            surf.blit(fonts["small"].render("[H] Heal", True, (80, 220, 80)),
+                      (px + pw - 120, heal_row_y + 9))
+        self._heal_rect = pygame.Rect(px + 16, heal_row_y, pw - 32, 34)
+
+        hint = fonts["small"].render(
+            "UP/DOWN select  |  ◄/► page  |  [B] buy  |  [E] equip  |  [H] heal  |  [TAB] close",
+            True, GRAY)
+        surf.blit(hint, (px + pw // 2 - hint.get_width() // 2, py + ph - 28))
+
+    def _draw_tokens(self, surf, player, fonts, px, py, pw, ph):
+        TOK_COL    = (255, 200, 60)
+        ITEMS_PER  = 4
+        items      = list(COSMETICS)
+        total_pages = max(1, math.ceil(len(items) / ITEMS_PER))
+        self.cosm_page = max(0, min(self.cosm_page, total_pages - 1))
+        page_start  = self.cosm_page * ITEMS_PER
+        page_items  = items[page_start : page_start + ITEMS_PER]
+
+        # ── Title + page indicator ────────────────────────────────────────────
+        surf.blit(fonts["med"].render("Cosmetics", True, TOK_COL),
+                  (px + pw // 2 - fonts["med"].size("Cosmetics")[0] // 2, py + 72))
+        page_lbl = fonts["tiny"].render(
+            f"Page {self.cosm_page + 1} / {total_pages}", True, GRAY)
+        surf.blit(page_lbl, (px + pw // 2 - page_lbl.get_width() // 2, py + 96))
+
+        # ── Cosmetic rows ─────────────────────────────────────────────────────
+        row_h      = 76
+        rows_top   = py + 118
+
+        self._cosm_rects = {}
+        for slot, cosm in enumerate(page_items):
+            global_i = page_start + slot
+            row_y    = rows_top + slot * row_h
+            owned    = cosm["id"] in player.owned_cosmetics
+            equipped = cosm["id"] == player.active_cosmetic
+            can_buy  = TOKENS.total >= cosm["cost"]
+            req_seraph  = cosm.get("req_seraphix_kills", 0)
+            req_nyx     = cosm.get("req_nyxoth_kills", 0)
+            meets_kills = (TOKENS.seraphix_kills >= req_seraph and
+                           TOKENS.nyxoth_kills   >= req_nyx)
+            cursor   = (global_i == self.selected if self.selected < 1000 else False)
+
+            bg_col  = (40, 55, 40) if equipped else ((50, 45, 20) if cursor else (35, 35, 52))
+            brd_col = TOK_COL if equipped else (
+                (255, 230, 80) if cursor else (
+                (80, 200, 80) if owned else (
+                TOK_COL if (can_buy and meets_kills) else (60, 55, 30))))
+            row_rect = pygame.Rect(px + 16, row_y, pw - 32, row_h - 6)
+            pygame.draw.rect(surf, bg_col,  row_rect, border_radius=8)
+            pygame.draw.rect(surf, brd_col, row_rect, 1, border_radius=8)
+
+            # Preview circle
+            _draw_cosmetic_preview(surf, cosm["pattern"], cosm["preview"],
+                                   px + 50, row_y + (row_h - 6) // 2, 20)
+
+            # Name + desc
+            surf.blit(fonts["med"].render(cosm["name"], True, WHITE),
+                      (px + 84, row_y + 10))
+            surf.blit(fonts["small"].render(cosm["desc"], True, (160, 160, 180)),
+                      (px + 84, row_y + 36))
+
+            # Right-side status
+            if equipped:
+                surf.blit(fonts["small"].render("Equipped", True, (80, 220, 80)),
+                          (px + pw - 130, row_y + 24))
+            elif owned:
+                surf.blit(fonts["small"].render("[E] Equip", True, CYAN),
+                          (px + pw - 130, row_y + 24))
+            else:
+                cost_col = (255, 200, 60) if (can_buy and meets_kills) else (100, 80, 40)
+                draw_token_coin(surf, px + pw - 122, row_y + 18, 7)
+                surf.blit(fonts["med"].render(str(cosm["cost"]), True, cost_col),
+                          (px + pw - 112, row_y + 10))
+                if (req_seraph > 0 or req_nyx > 0) and not meets_kills:
+                    kills_col = (180, 120, 255)
+                    if req_seraph > 0 and TOKENS.seraphix_kills < req_seraph:
+                        hint_txt = f"Seraphix: {TOKENS.seraphix_kills}/{req_seraph}"
+                    else:
+                        hint_txt = f"Nyxoth: {TOKENS.nyxoth_kills}/{req_nyx}"
+                    surf.blit(fonts["tiny"].render(hint_txt, True, kills_col),
+                              (px + pw - 112, row_y + 36))
+                elif can_buy and meets_kills:
+                    surf.blit(fonts["small"].render("[B] Buy", True, (80, 220, 80)),
+                              (px + pw - 112, row_y + 36))
+
+            self._cosm_rects[slot] = (row_rect, cosm["id"], owned, equipped)
+
+        # ── Prev / Next page buttons ──────────────────────────────────────────
+        nav_y    = rows_top + ITEMS_PER * row_h + 6
+        btn_w    = 110; btn_h = 32
+        prev_rect = pygame.Rect(px + 16,             nav_y, btn_w, btn_h)
+        next_rect = pygame.Rect(px + pw - 16 - btn_w, nav_y, btn_w, btn_h)
+
+        for rect, label, enabled in [
+            (prev_rect, "◄ Prev", self.cosm_page > 0),
+            (next_rect, "Next ►", self.cosm_page < total_pages - 1),
+        ]:
+            col = CYAN if enabled else (50, 50, 70)
+            bg  = lerp_color(PANEL, col, 0.15) if enabled else PANEL
+            pygame.draw.rect(surf, bg,  rect, border_radius=7)
+            pygame.draw.rect(surf, col, rect, 1, border_radius=7)
+            lbl = fonts["small"].render(label, True, col)
+            surf.blit(lbl, (rect.centerx - lbl.get_width() // 2,
+                            rect.centery - lbl.get_height() // 2))
+
+        # Store nav rects for click handling
+        self._cosm_prev_rect = prev_rect if self.cosm_page > 0 else None
+        self._cosm_next_rect = next_rect if self.cosm_page < total_pages - 1 else None
+
+        # ── Token balance ─────────────────────────────────────────────────────
+        bal_y = py + ph - 68
+        pygame.draw.rect(surf, (40, 38, 20), (px + 16, bal_y, pw - 32, 36), border_radius=10)
+        pygame.draw.rect(surf, TOK_COL,      (px + 16, bal_y, pw - 32, 36), 1, border_radius=10)
+        bal_s = fonts["med"].render(f"Your Tokens:  {TOKENS.total}", True, TOK_COL)
+        surf.blit(bal_s, (px + pw // 2 - bal_s.get_width() // 2, bal_y + 9))
+
+        hint = fonts["small"].render(
+            "UP/DOWN select  |  ◄/► page  |  [B] buy  |  [E] equip  |  [TAB] close", True, GRAY)
+        surf.blit(hint, (px + pw // 2 - hint.get_width() // 2, py + ph - 28))
+
+    def handle_key(self, key, player, floating_texts):
+        if not self.open:
+            return
+        # Tab switching — Q for Weapons, T for Token Shop
+        if key == pygame.K_q:
+            self.page = self.PAGE_WEAPONS
+            return
+
+        if self.page == self.PAGE_TOKENS:
+            ITEMS_PER   = 4
+            items       = list(COSMETICS)
+            total_pages = max(1, math.ceil(len(items) / ITEMS_PER))
+            if self.selected >= len(items) or self.selected < 0:
+                self.selected = 0
+            if key == pygame.K_UP:
+                self.selected = (self.selected - 1) % len(items)
+                self.cosm_page = self.selected // ITEMS_PER
+                return
+            if key == pygame.K_DOWN:
+                self.selected = (self.selected + 1) % len(items)
+                self.cosm_page = self.selected // ITEMS_PER
+                return
+            if key == pygame.K_LEFT:
+                self.cosm_page = max(0, self.cosm_page - 1)
+                self.selected  = self.cosm_page * ITEMS_PER
+                return
+            if key == pygame.K_RIGHT:
+                self.cosm_page = min(total_pages - 1, self.cosm_page + 1)
+                self.selected  = self.cosm_page * ITEMS_PER
+                return
+            cosm  = items[self.selected]
+            owned = cosm["id"] in player.owned_cosmetics
+            meets_kills = (TOKENS.seraphix_kills >= cosm.get("req_seraphix_kills", 0) and
+                           TOKENS.nyxoth_kills   >= cosm.get("req_nyxoth_kills", 0))
+            if key == pygame.K_b and not owned and meets_kills and TOKENS.spend(cosm["cost"]):
+                player.owned_cosmetics.add(cosm["id"])
+                player.active_cosmetic = cosm["id"]
+                TOKENS.unlock_cosmetic(cosm["id"])
+                TOKENS.equip_cosmetic(cosm["id"])
+                floating_texts.append(
+                    FloatingText(player.x, player.y - 30,
+                                 f"Unlocked {cosm['name']}!", (255, 200, 60), 20))
+            elif key == pygame.K_e and owned:
+                player.active_cosmetic = cosm["id"]
+                TOKENS.equip_cosmetic(cosm["id"])
+                floating_texts.append(
+                    FloatingText(player.x, player.y - 30,
+                                 f"Equipped {cosm['name']}!", CYAN, 20))
+            return
+
+        # Unified weapons page
+        ITEMS_PER   = 7
+        all_weapons = [(i, w, False) for i, w in enumerate(WEAPONS)]
+        all_weapons += [(1000 + i, w, True) for i, w in enumerate(SPECIAL_WEAPONS)]
+        total_pages = max(1, math.ceil(len(all_weapons) / ITEMS_PER))
+
+        # Normalise selected to a valid index in all_weapons
+        all_idxs = [widx for widx, _, _ in all_weapons]
+        if self.selected not in all_idxs:
+            self.selected = 0
+        cur_pos = all_idxs.index(self.selected)
+
+        if key == pygame.K_UP:
+            cur_pos = (cur_pos - 1) % len(all_weapons)
+            self.selected  = all_idxs[cur_pos]
+            self.weap_page = cur_pos // ITEMS_PER
+            return
+        if key == pygame.K_DOWN:
+            cur_pos = (cur_pos + 1) % len(all_weapons)
+            self.selected  = all_idxs[cur_pos]
+            self.weap_page = cur_pos // ITEMS_PER
+            return
+        if key == pygame.K_LEFT:
+            self.weap_page = max(0, self.weap_page - 1)
+            self.selected  = all_idxs[self.weap_page * ITEMS_PER]
+            return
+        if key == pygame.K_RIGHT:
+            self.weap_page = min(total_pages - 1, self.weap_page + 1)
+            self.selected  = all_idxs[self.weap_page * ITEMS_PER]
+            return
+        if key == pygame.K_h:
+            self._do_heal(player, floating_texts)
+            return
+
+        widx, w, is_special = all_weapons[cur_pos]
+        owned      = widx in player.owned_weapons
+        equipped   = widx == player.weapon_idx
+        meets_lvl  = player.level >= w["req_lvl"]
+        can_afford = player.gold >= w["cost"]
+        cwc2       = getattr(player, "corruption_waves_cleared", 0)
+        unlocked   = cwc2 >= w.get("unlock_value", 0) if is_special else True
+
+        if key == pygame.K_b and not owned and meets_lvl and unlocked and can_afford:
+            player.gold -= w["cost"]
+            player.owned_weapons.append(widx)
+            player.weapon_idx = widx
+            floating_texts.append(FloatingText(
+                player.x, player.y - 30, f"Bought {w['name']}!",
+                (255, 80, 220) if is_special else YELLOW, 20))
+        elif key == pygame.K_e and owned and not equipped and meets_lvl:
+            player.weapon_idx = widx
+            floating_texts.append(FloatingText(
+                player.x, player.y - 30, f"Equipped {w['name']}!",
+                (180, 80, 255) if is_special else CYAN, 20))
+
+    def handle_click(self, pos, player, floating_texts):
+        """Call this when a mouse click occurs while the shop is open."""
+        if not self.open:
+            return
+        pw, ph = 700, 680
+        px = SW // 2 - pw // 2; py = SH // 2 - ph // 2
+        tab_w2 = pw // 2
+        # Tab header clicks
+        if py <= pos[1] <= py + 48:
+            if px <= pos[0] <= px + tab_w2:
+                self.page = self.PAGE_WEAPONS
+                self.selected = 0
+            elif px + tab_w2 <= pos[0] <= px + pw:
+                self.page = self.PAGE_TOKENS
+                self.selected = 0
+            return
+        if self.page == self.PAGE_WEAPONS:
+            # Heal button
+            if hasattr(self, "_heal_rect") and self._heal_rect.collidepoint(pos):
+                self._do_heal(player, floating_texts)
+                return
+            # Prev / Next page buttons
+            if getattr(self, "_weap_prev_rect", None) and self._weap_prev_rect.collidepoint(pos):
+                self.weap_page = max(0, self.weap_page - 1)
+                ITEMS_PER = 7
+                all_idxs = [i for i in range(len(WEAPONS))] + [1000 + i for i in range(len(SPECIAL_WEAPONS))]
+                self.selected = all_idxs[self.weap_page * ITEMS_PER]
+                return
+            if getattr(self, "_weap_next_rect", None) and self._weap_next_rect.collidepoint(pos):
+                self.weap_page += 1
+                ITEMS_PER = 7
+                all_idxs = [i for i in range(len(WEAPONS))] + [1000 + i for i in range(len(SPECIAL_WEAPONS))]
+                self.selected = all_idxs[self.weap_page * ITEMS_PER]
+                return
+            # Weapon row clicks
+            for slot, (rect, widx, w, is_special, owned, equipped) in getattr(self, "_weap_rects", {}).items():
+                if rect.collidepoint(pos):
+                    self.selected = widx
+                    meets_lvl  = player.level >= w["req_lvl"]
+                    can_afford = player.gold >= w["cost"]
+                    cwc        = getattr(player, "corruption_waves_cleared", 0)
+                    unlocked   = cwc >= w.get("unlock_value", 0) if is_special else True
+                    if not owned and meets_lvl and unlocked and can_afford:
+                        player.gold -= w["cost"]
+                        player.owned_weapons.append(widx)
+                        player.weapon_idx = widx
+                        floating_texts.append(FloatingText(
+                            player.x, player.y - 30, f"Bought {w['name']}!",
+                            (255, 80, 220) if is_special else YELLOW, 20))
+                    elif owned and not equipped and meets_lvl:
+                        player.weapon_idx = widx
+                        floating_texts.append(FloatingText(
+                            player.x, player.y - 30, f"Equipped {w['name']}!",
+                            (180, 80, 255) if is_special else CYAN, 20))
+                    break
+        elif self.page == self.PAGE_TOKENS:
+            # Prev / Next page buttons
+            if getattr(self, "_cosm_prev_rect", None) and self._cosm_prev_rect.collidepoint(pos):
+                self.cosm_page = max(0, self.cosm_page - 1)
+                self.selected  = self.cosm_page * 4
+                return
+            if getattr(self, "_cosm_next_rect", None) and self._cosm_next_rect.collidepoint(pos):
+                self.cosm_page += 1
+                self.selected   = self.cosm_page * 4
+                return
+            for slot, (rect, cosm_id, owned, equipped) in getattr(self, "_cosm_rects", {}).items():
+                if rect.collidepoint(pos):
+                    global_i = self.cosm_page * 4 + slot
+                    self.selected = global_i
+                    cosm = next((c for c in COSMETICS if c["id"] == cosm_id), None)
+                    meets_kills = (cosm and
+                                   TOKENS.seraphix_kills >= cosm.get("req_seraphix_kills", 0) and
+                                   TOKENS.nyxoth_kills   >= cosm.get("req_nyxoth_kills", 0))
+                    if cosm and not owned and meets_kills and TOKENS.spend(cosm["cost"]):
+                        player.owned_cosmetics.add(cosm_id)
+                        player.active_cosmetic = cosm_id
+                        TOKENS.unlock_cosmetic(cosm_id)
+                        TOKENS.equip_cosmetic(cosm_id)
+                        floating_texts.append(
+                            FloatingText(player.x, player.y - 30,
+                                         f"Unlocked {cosm['name']}!", (255, 200, 60), 20))
+                    elif owned and not equipped:
+                        player.active_cosmetic = cosm_id
+                        TOKENS.equip_cosmetic(cosm_id)
+                        floating_texts.append(
+                            FloatingText(player.x, player.y - 30,
+                                         f"Equipped {cosm['name']}!", CYAN, 20))
+                    break
+
+    def _do_heal(self, player, floating_texts):
+        if player.gold >= 250 and player.hp < player.max_hp:
+            player.gold -= 250
+            healed = min(10, player.max_hp - player.hp)
+            player.hp  += healed
+            floating_texts.append(
+                FloatingText(player.x, player.y - 40, f"+{healed} HP", (80, 220, 80), 20))
+
+# ── Perk Card Screen ──────────────────────────────────────────────────────────
+
+class PerkScreen:
+    CARD_W = 220
+    CARD_H = 280
+    GAP    = 30
+
+    def __init__(self, player, fonts):
+        self.player  = player
+        self.fonts   = fonts
+        self.active  = False
+        self.cards   = []     # list of 3 perk dicts
+        self.hovered = -1
+        self.chosen  = False
+
+    def offer(self):
+        """Pick 3 distinct random perks and show the screen."""
+        pool = ALL_PERKS[:]
+        random.shuffle(pool)
+        self.cards  = pool[:3]
+        self.active = True
+        self.chosen = False
+
+    def handle_event(self, event):
+        if not self.active:
+            return
+        if event.type == pygame.MOUSEMOTION:
+            self.hovered = self._card_at(*event.pos)
+        if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+            idx = self._card_at(*event.pos)
+            if idx >= 0:
+                self._pick(idx)
+        if event.type == pygame.KEYDOWN:
+            if event.key in (pygame.K_1, pygame.K_KP1): self._pick(0)
+            if event.key in (pygame.K_2, pygame.K_KP2): self._pick(1)
+            if event.key in (pygame.K_3, pygame.K_KP3): self._pick(2)
+
+    def _pick(self, idx):
+        if 0 <= idx < len(self.cards):
+            perk = self.cards[idx]
+            self.player.apply_perk(perk["key"], perk["bonus"])
+            self.active = False
+            self.chosen = True
+
+    def _card_x(self, idx):
+        total_w = self.CARD_W * 3 + self.GAP * 2
+        start_x = SW // 2 - total_w // 2
+        return start_x + idx * (self.CARD_W + self.GAP)
+
+    def _card_at(self, mx, my):
+        cy = SH // 2 - self.CARD_H // 2
+        for i in range(3):
+            cx = self._card_x(i)
+            if cx <= mx <= cx + self.CARD_W and cy <= my <= cy + self.CARD_H:
+                return i
+        return -1
+
+    def draw(self, surf):
+        if not self.active:
+            return
+        # Dim background
+        overlay = pygame.Surface((SW, SH), pygame.SRCALPHA)
+        overlay.fill((0, 0, 0, 190))
+        surf.blit(overlay, (0, 0))
+
+        # Title
+        title = self.fonts["huge"].render("CHOOSE A PERK", True, YELLOW)
+        surf.blit(title, (SW // 2 - title.get_width() // 2, SH // 2 - self.CARD_H // 2 - 64))
+        sub = self.fonts["small"].render("Click a card  or press  1 / 2 / 3", True, GRAY)
+        surf.blit(sub, (SW // 2 - sub.get_width() // 2, SH // 2 - self.CARD_H // 2 - 28))
+
+        cy = SH // 2 - self.CARD_H // 2
+        for i, perk in enumerate(self.cards):
+            cx      = self._card_x(i)
+            hovered = (i == self.hovered)
+            col     = perk["color"]
+
+            # Card background
+            bg = lerp_color(PANEL, col, 0.12 if hovered else 0.04)
+            pygame.draw.rect(surf, bg, (cx, cy, self.CARD_W, self.CARD_H), border_radius=14)
+            border_col = col if hovered else lerp_color(GRAY, col, 0.4)
+            pygame.draw.rect(surf, border_col, (cx, cy, self.CARD_W, self.CARD_H),
+                             3 if hovered else 1, border_radius=14)
+
+            # Glow on hover
+            if hovered:
+                glow_s = pygame.Surface((self.CARD_W + 20, self.CARD_H + 20), pygame.SRCALPHA)
+                pygame.draw.rect(glow_s, (*col, 40), (0, 0, self.CARD_W + 20, self.CARD_H + 20),
+                                 border_radius=18)
+                surf.blit(glow_s, (cx - 10, cy - 10))
+
+            # Big icon circle
+            icon_cy = cy + 72
+            pygame.draw.circle(surf, lerp_color(DARK, col, 0.3), (cx + self.CARD_W // 2, icon_cy), 44)
+            pygame.draw.circle(surf, col,  (cx + self.CARD_W // 2, icon_cy), 44, 2)
+            # Draw first letter of label as the icon
+            icon_ltr = self.fonts["huge"].render(perk["label"][0], True, col)
+            surf.blit(icon_ltr, (cx + self.CARD_W // 2 - icon_ltr.get_width() // 2,
+                                 icon_cy - icon_ltr.get_height() // 2))
+
+            # Perk name
+            name = self.fonts["large"].render(perk["label"], True, WHITE)
+            surf.blit(name, (cx + self.CARD_W // 2 - name.get_width() // 2, cy + 132))
+
+            # Description
+            desc = self.fonts["small"].render(perk["desc"], True, col)
+            surf.blit(desc, (cx + self.CARD_W // 2 - desc.get_width() // 2, cy + 166))
+
+            # Stacks owned + preview of total after picking
+            stacks     = int(self.player.perk(perk["key"]) / perk["bonus"] + 0.5)
+            future_val = self.player.perk(perk["key"]) + perk["bonus"]
+            if perk["key"] == "hp_regen":
+                future_str = f"Total: +{int(future_val)} HP/3s"
+            else:
+                future_str = f"Total: +{int(future_val * 100)}%"
+            if stacks > 0:
+                st_txt = self.fonts["tiny"].render(f"Owned: {stacks}x  |  {future_str}", True, lerp_color(GRAY, col, 0.5))
+            else:
+                st_txt = self.fonts["tiny"].render(future_str, True, lerp_color(GRAY, col, 0.5))
+            surf.blit(st_txt, (cx + self.CARD_W // 2 - st_txt.get_width() // 2, cy + 194))
+
+            # Key hint
+            key_hint = self.fonts["med"].render(f"[{i+1}]", True, GRAY if not hovered else YELLOW)
+            surf.blit(key_hint, (cx + self.CARD_W // 2 - key_hint.get_width() // 2,
+                                 cy + self.CARD_H - 36))
+
+# ── Username entry screen ─────────────────────────────────────────────────────
+
+def is_first_run():
+    """Returns True and marks as seen if this is the first ever play press."""
+    if not os.path.isfile(FIRST_RUN_FILE):
+        try:
+            with open(FIRST_RUN_FILE, "w") as f:
+                json.dump({"seen_tutorial": True}, f)
+        except Exception:
+            pass
+        return True
+    return False
+
+
+def username_screen(screen, clock, fonts):
+    """Title / setup screen. Returns username_str."""
+    username      = ""
+    cursor_blink  = 0
+    show_lb       = False
+    show_settings = False
+    show_patchnotes = False
+    show_credits  = False
+    show_tutorial = False   # shown once on first ever play
+    tutorial_page = 0       # 0 = controls, 1 = mechanics
+    credits_page  = 0
+    slider_drag   = False
+    lb            = Leaderboard()
+    # Tip — pick one randomly each time the player enters the main menu
+    tip_idx = random.randrange(len(MENU_TIPS))
+
+    MUSIC.play("menu")
+
+    # Background: video (high quality) or image slideshow (low quality)
+    # Use a list so the quality toggle handler can swap the value out
+    menu_video      = [MenuVideo() if not GAME_SETTINGS.low else None]
+    # Slideshow state — loaded lazily when low quality is first needed
+    slideshow_surfs = []
+    slide_idx    = 0
+    slide_timer  = 0
+    SLIDE_HOLD   = FPS * 4   # 4 seconds per image
+    FADE_FRAMES  = FPS // 2  # 30 frames = 0.5s crossfade
+    slide_fade   = 0         # 0 = not fading; 1..FADE_FRAMES = mid-crossfade
+    slide_next   = 0         # index of the incoming image during crossfade
+
+    def _load_slides():
+        surfs = []
+        for idx in range(5):
+            path = asset(f"slide_{idx}.png")
+            if os.path.isfile(path):
+                try:
+                    img = pygame.image.load(path).convert()
+                    img = pygame.transform.smoothscale(img, (SW, SH))
+                    surfs.append(img)
+                except pygame.error:
+                    pass
+        return surfs
+
+    # Load now if starting in low quality
+    if GAME_SETTINGS.low:
+        slideshow_surfs = _load_slides()
+
+    # Flame particles for the title effect (used on low quality)
+    flame_particles = []
+    flame_timer     = 0
+
+    # High-quality procedural fire simulation (cellular automaton style)
+    # Wrapped in a dict so the draw loop can reassign without nonlocal.
+    _fire = {
+        "buf":  None,   # 2-D list of heat values [col][row], 0.0–1.0
+        "w":    0,
+        "h":    0,
+        "tick": 0,
+    }
+
+    # Settings panel geometry (defined here so hit-tests work before first draw)
+    SP_W, SP_H = 420, 360   # taller to fit quality row
+    SP_X = SW // 2 - SP_W // 2
+    SP_Y = SH // 2 - SP_H // 2
+    SLIDER_X  = SP_X + 80
+    SLIDER_W  = SP_W - 160
+    SLIDER_Y  = SP_Y + 110    # music slider Y
+    SLIDER2_Y = SP_Y + 195    # sfx slider Y
+    QUALITY_Y = SP_Y + 268    # quality toggle Y
+
+    def vol_to_x(vol):
+        return int(SLIDER_X + vol * SLIDER_W)
+
+    def x_to_vol(px):
+        return max(0.0, min(1.0, (px - SLIDER_X) / SLIDER_W))
+
+    # Pre-define button rects so they exist before the first draw pass
+    lb_rect       = pygame.Rect(0, 0, 1, 1)
+    pn_rect       = pygame.Rect(0, 0, 1, 1)
+    settings_rect = pygame.Rect(0, 0, 1, 1)
+    credits_rect  = pygame.Rect(0, 0, 1, 1)
+    close_rect    = pygame.Rect(SW - 48, 8, 36, 36)
+    play_rect     = None
+
+    while True:
+        clock.tick(FPS)
+        cursor_blink += 1
+        mx_now, my_now = pygame.mouse.get_pos()
+
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                pygame.quit(); sys.exit()
+
+            # ── Settings overlay consumes all input while open ─────────────
+            if show_settings:
+                if event.type == pygame.KEYDOWN:
+                    if event.key in (pygame.K_ESCAPE, pygame.K_RETURN):
+                        show_settings = False
+                        slider_drag   = False
+                if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                    px, py = event.pos
+                    if (SLIDER_X - 10 <= px <= SLIDER_X + SLIDER_W + 10 and
+                            SLIDER_Y - 14 <= py <= SLIDER_Y + 14):
+                        slider_drag = "music"
+                        MUSIC.set_volume(x_to_vol(px))
+                    elif (SLIDER_X - 10 <= px <= SLIDER_X + SLIDER_W + 10 and
+                            SLIDER2_Y - 14 <= py <= SLIDER2_Y + 14):
+                        slider_drag = "sfx"
+                        SOUNDS.set_volume(x_to_vol(px))
+                    elif (SP_X + 20 <= px <= SP_X + SP_W // 2 - 5 and
+                            QUALITY_Y <= py <= QUALITY_Y + 36):
+                        if GAME_SETTINGS.quality != "low":
+                            GAME_SETTINGS.quality = "low"
+                            GAME_SETTINGS.save()
+                            if menu_video[0]:
+                                menu_video[0].release()
+                                menu_video[0] = None
+                            if not slideshow_surfs:
+                                slideshow_surfs.extend(_load_slides())
+                            slide_idx = 0; slide_timer = 0; slide_fade = 0
+                    elif (SP_X + SP_W // 2 + 5 <= px <= SP_X + SP_W - 20 and
+                            QUALITY_Y <= py <= QUALITY_Y + 36):
+                        if GAME_SETTINGS.quality != "high":
+                            GAME_SETTINGS.quality = "high"
+                            GAME_SETTINGS.save()
+                            if menu_video[0] is None:
+                                menu_video[0] = MenuVideo()
+                            slideshow_surfs.clear()
+                    elif not (SP_X <= px <= SP_X + SP_W and SP_Y <= py <= SP_Y + SP_H):
+                        show_settings = False
+                if event.type == pygame.MOUSEBUTTONUP and event.button == 1:
+                    slider_drag = False
+                    GAME_SETTINGS.save()   # persist volume on release
+                if event.type == pygame.MOUSEMOTION and slider_drag:
+                    if slider_drag == "music":
+                        MUSIC.set_volume(x_to_vol(event.pos[0]))
+                    else:
+                        SOUNDS.set_volume(x_to_vol(event.pos[0]))
+                continue   # don't process other events while settings is open
+
+            # ── Leaderboard overlay ────────────────────────────────────────
+            if show_lb:
+                if event.type == pygame.KEYDOWN:
+                    show_lb = False
+                if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                    show_lb = False
+                continue
+
+            # ── Patch notes overlay ────────────────────────────────────────
+            if show_patchnotes:
+                if event.type == pygame.KEYDOWN:
+                    show_patchnotes = False
+                if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                    show_patchnotes = False
+                continue
+
+            # ── Tutorial overlay ───────────────────────────────────────────
+            if show_tutorial:
+                if event.type == pygame.KEYDOWN:
+                    if event.key in (pygame.K_RIGHT, pygame.K_d) and tutorial_page == 0:
+                        tutorial_page = 1
+                    elif event.key in (pygame.K_LEFT, pygame.K_a) and tutorial_page == 1:
+                        tutorial_page = 0
+                    elif event.key in (pygame.K_RETURN, pygame.K_ESCAPE) and tutorial_page == 1:
+                        if menu_video[0]: menu_video[0].release()
+                        return username.strip()
+                if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                    mx_t, my_t = event.pos
+                    TW, TH = 720, 480
+                    TX = SW // 2 - TW // 2; TY = SH // 2 - TH // 2
+                    next_btn  = pygame.Rect(TX + TW - 180, TY + TH - 56, 160, 40)
+                    prev_btn  = pygame.Rect(TX + 20,        TY + TH - 56, 160, 40)
+                    if tutorial_page == 0 and next_btn.collidepoint(mx_t, my_t):
+                        tutorial_page = 1
+                    elif tutorial_page == 1 and prev_btn.collidepoint(mx_t, my_t):
+                        tutorial_page = 0
+                    elif tutorial_page == 1 and next_btn.collidepoint(mx_t, my_t):
+                        if menu_video[0]: menu_video[0].release()
+                        return username.strip()
+                continue
+
+            # ── Credits overlay ────────────────────────────────────────────
+            if show_credits:
+                if event.type == pygame.KEYDOWN:
+                    if event.key in (pygame.K_LEFT, pygame.K_a):
+                        credits_page = max(0, credits_page - 1)
+                    elif event.key in (pygame.K_RIGHT, pygame.K_d):
+                        credits_page += 1   # clamped in draw
+                    else:
+                        show_credits = False
+                        credits_page = 0
+                if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                    show_credits = False
+                    credits_page = 0
+                continue
+
+            # ── Normal events ──────────────────────────────────────────────
+            if event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_RETURN and username.strip():
+                    if is_first_run():
+                        show_tutorial = True
+                        tutorial_page = 0
+                    else:
+                        if menu_video[0]: menu_video[0].release()
+                        return username.strip()
+                elif event.key == pygame.K_BACKSPACE:
+                    username = username[:-1]
+                elif len(username) < 16 and event.unicode.isprintable():
+                    username += event.unicode
+            if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                px, py = event.pos
+                if close_rect.collidepoint(px, py):
+                    if menu_video[0]: menu_video[0].release()
+                    pygame.quit(); sys.exit()
+                if lb_rect.collidepoint(px, py):
+                    show_lb = True
+                elif pn_rect.collidepoint(px, py):
+                    show_patchnotes = True
+                elif credits_rect.collidepoint(px, py):
+                    show_credits = True
+                    credits_page = 0
+                elif settings_rect.collidepoint(px, py):
+                    show_settings = True
+                elif play_rect and play_rect.collidepoint(px, py) and username.strip():
+                    if is_first_run():
+                        show_tutorial = True
+                        tutorial_page = 0
+                    else:
+                        if menu_video[0]: menu_video[0].release()
+                        return username.strip()
+
+        # ── Draw ─────────────────────────────────────────────────────────────
+        # Background
+        if GAME_SETTINGS.low:
+            # Slideshow with crossfade — only advance when actually in low quality
+            if slideshow_surfs:
+                if slide_fade > 0:
+                    # Mid-crossfade: draw current image then blend next on top
+                    screen.blit(slideshow_surfs[slide_idx], (0, 0))
+                    t_fade = slide_fade / FADE_FRAMES          # 0→1
+                    fade_alpha = max(0, min(255, int(255 * t_fade)))
+                    next_surf = slideshow_surfs[slide_next].copy()
+                    next_surf.set_alpha(fade_alpha)
+                    screen.blit(next_surf, (0, 0))
+                    slide_fade += 1
+                    if slide_fade > FADE_FRAMES:
+                        # Crossfade complete — commit to next image
+                        slide_idx  = slide_next
+                        slide_fade = 0
+                        slide_timer = 0
+                else:
+                    screen.blit(slideshow_surfs[slide_idx], (0, 0))
+                    slide_timer += 1
+                    if slide_timer >= SLIDE_HOLD:
+                        # Start crossfade to next image
+                        slide_next = (slide_idx + 1) % len(slideshow_surfs)
+                        slide_fade = 1
+                # Dark overlay so UI stays readable
+                ov_sl = pygame.Surface((SW, SH), pygame.SRCALPHA)
+                ov_sl.fill((0, 0, 0, 120))
+                screen.blit(ov_sl, (0, 0))
+            else:
+                # No slides found — fallback to static grid
+                screen.fill(DARK)
+                tile = 64
+                for gx in range(SW // tile + 1):
+                    for gy in range(SH // tile + 1):
+                        pygame.draw.rect(screen, (26, 26, 40),
+                                         (gx * tile, gy * tile, tile - 1, tile - 1))
+        else:
+            vid_frame = menu_video[0].next_frame(SW, SH) if menu_video[0] else None
+            if vid_frame:
+                screen.blit(vid_frame, (0, 0))
+                vov = pygame.Surface((SW, SH), pygame.SRCALPHA)
+                vov.fill((0, 0, 0, 140))
+                screen.blit(vov, (0, 0))
+            else:
+                screen.fill(DARK)
+                tile = 64
+                for gx in range(SW // tile + 1):
+                    for gy in range(SH // tile + 1):
+                        pygame.draw.rect(screen, (26, 26, 40),
+                                         (gx * tile, gy * tile, tile - 1, tile - 1))
+
+        # ── Title with animated flame ─────────────────────────────────────────
+        TITLE_TEXT  = "DUNGEON CRAWLER"
+        TITLE_COL   = (180, 60, 220)   # purple
+        title       = fonts["huge"].render(TITLE_TEXT, True, TITLE_COL)
+        title_x     = SW // 2 - title.get_width() // 2
+        title_y     = 108
+        title_bot   = title_y + title.get_height()
+
+        if not GAME_SETTINGS.low:
+            # ── High quality: cellular-automaton fire simulation ──────────────
+            _CELL = 6   # pixels per cell — larger = faster + chunkier flames
+            fw_cells = (title.get_width() + 3) // _CELL
+            fh_cells = (title.get_height() * 2) // _CELL   # 2× text height tall
+
+            # Initialise or resize buffer
+            if _fire["buf"] is None or _fire["w"] != fw_cells or _fire["h"] != fh_cells:
+                _fire["w"]   = fw_cells
+                _fire["h"]   = fh_cells
+                _fire["buf"] = [[0.0] * fh_cells for _ in range(fw_cells)]
+
+            _fire["tick"] += 1
+
+            # Step simulation every other frame
+            if _fire["tick"] % 2 == 0:
+                buf = _fire["buf"]
+                fw  = fw_cells
+                fh  = fh_cells
+
+                # Seed bottom row with full heat
+                for x in range(fw):
+                    buf[x][fh - 1] = random.uniform(0.85, 1.0)
+                    buf[x][fh - 2] = random.uniform(0.65, 1.0)
+
+                new_buf = [[0.0] * fh for _ in range(fw)]
+                for x in range(fw):
+                    for y in range(fh - 1):
+                        xl = max(0, x - 1)
+                        xr = min(fw - 1, x + 1)
+                        heat = (
+                            buf[xl][y + 1] * 0.22 +
+                            buf[x ][y + 1] * 0.56 +
+                            buf[xr][y + 1] * 0.22
+                        )
+                        # Cool more aggressively so flames die before reaching the top
+                        cool = 0.06 + ((fh - 1 - y) / fh) * 0.06
+                        new_buf[x][y] = max(0.0, heat - cool)
+                    new_buf[x][fh - 1] = buf[x][fh - 1]
+                _fire["buf"] = new_buf
+
+            # Render — skip cells below a visible threshold, strong alpha falloff
+            buf = _fire["buf"]
+            fw  = _fire["w"]
+            fh  = _fire["h"]
+            fire_surf = pygame.Surface((fw * _CELL, fh * _CELL), pygame.SRCALPHA)
+            for x in range(fw):
+                for y in range(fh):
+                    h = buf[x][y]
+                    if h < 0.08:
+                        continue   # invisible — skip entirely
+                    # Colour: bright yellow-white core → orange → dark red tip
+                    if h > 0.75:
+                        col = lerp_color((255, 160, 20), (255, 240, 120), (h - 0.75) / 0.25)
+                    elif h > 0.45:
+                        col = lerp_color((220, 60, 0),   (255, 160, 20),  (h - 0.45) / 0.30)
+                    else:
+                        col = lerp_color((120, 20, 0),   (220, 60, 0),    (h - 0.08) / 0.37)
+                    # Alpha: quadratic falloff — low heat = nearly invisible
+                    alpha = min(255, int((h ** 1.6) * 255))
+                    pygame.draw.rect(fire_surf, (*col, alpha),
+                                     (x * _CELL, y * _CELL, _CELL, _CELL))
+
+            # Blit so the fire's bottom aligns with the bottom of the title text
+            fire_x = title_x - -1
+            fire_y = title_bot - fh * _CELL - 11
+            screen.blit(fire_surf, (fire_x, fire_y))
+
+        else:
+            # ── Low quality: procedural flame particles ───────────────────────
+            flame_timer += 1
+            if flame_timer % 2 == 0:   # spawn every 2 frames for density
+                for _ in range(4):
+                    fx = title_x + random.randint(0, title.get_width())
+                    fy = title_y + random.randint(-4, 8)
+                    flame_particles.append([
+                        float(fx), float(fy),
+                        random.uniform(-0.4, 0.4),   # vx
+                        random.uniform(-2.2, -0.8),  # vy  (upward)
+                        random.randint(20, 40),       # life
+                        random.randint(20, 40),       # max_life
+                        random.randint(4, 9),         # size
+                    ])
+
+            # Update + draw flame particles (behind title text)
+            next_fp = []
+            for fp in flame_particles:
+                fp[0] += fp[2]; fp[1] += fp[3]
+                fp[4] -= 1
+                if fp[4] > 0:
+                    next_fp.append(fp)
+                    t    = fp[4] / fp[5]           # 1→0 as particle ages
+                    size = max(1, int(fp[6] * t))
+                    # Colour: bright yellow core → orange → red tip as life fades
+                    if t > 0.6:
+                        col = lerp_color((255, 220, 60), (255, 100, 10), 1 - (t - 0.6) / 0.4)
+                    elif t > 0.25:
+                        col = lerp_color((255, 100, 10), (180, 20, 80), 1 - (t - 0.25) / 0.35)
+                    else:
+                        col = lerp_color((180, 20, 80), (60, 0, 60), 1 - t / 0.25)
+                    alpha = max(0, min(255, int(200 * t)))
+                    if alpha > 0:
+                        r2 = max(0, min(255, int(col[0])))
+                        g2 = max(0, min(255, int(col[1])))
+                        b2 = max(0, min(255, int(col[2])))
+                        fs = pygame.Surface((size * 2 + 2, size * 2 + 2), pygame.SRCALPHA)
+                        pygame.draw.circle(fs, (r2, g2, b2, alpha), (size + 1, size + 1), size)
+                        screen.blit(fs, (int(fp[0]) - size - 1, int(fp[1]) - size - 1))
+            flame_particles = next_fp
+
+        # Draw title on top of the flame
+        # Subtle glow pass (slightly larger, dim purple)
+        glow_s = fonts["huge"].render(TITLE_TEXT, True, (100, 20, 140))
+        screen.blit(glow_s, (title_x - 1, title_y + 1))
+        screen.blit(title, (title_x, title_y))
+
+        title_y_end = title_bot + 10
+        sub = fonts["med"].render("Enter your username to begin", True, GRAY)
+        screen.blit(sub, (SW // 2 - sub.get_width() // 2, title_y_end))
+
+        # Username input box
+        box_w, box_h = 400, 52
+        box_x = SW // 2 - box_w // 2
+        box_y = SH // 2 - box_h // 2 - 40
+        pygame.draw.rect(screen, PANEL, (box_x, box_y, box_w, box_h), border_radius=10)
+        pygame.draw.rect(screen, CYAN,  (box_x, box_y, box_w, box_h), 2, border_radius=10)
+        display_text = username + ("|" if cursor_blink % 60 < 30 else "")
+        screen.blit(fonts["large"].render(display_text, True, WHITE), (box_x + 14, box_y + 12))
+
+        # Three top buttons + Credits button below
+        btn_y    = box_y + box_h + 16
+        btn_h    = 36
+        btn_w    = 178
+        gap      = 10
+        total_w  = btn_w * 3 + gap * 2
+        lb_rect       = pygame.Rect(SW // 2 - total_w // 2,               btn_y, btn_w, btn_h)
+        pn_rect       = pygame.Rect(SW // 2 - total_w // 2 + btn_w + gap, btn_y, btn_w, btn_h)
+        settings_rect = pygame.Rect(SW // 2 - total_w // 2 + (btn_w + gap) * 2, btn_y, btn_w, btn_h)
+        credits_rect  = pygame.Rect(SW // 2 - btn_w // 2, btn_y + btn_h + 8, btn_w, btn_h)
+
+        for rect, label, col in [
+            (lb_rect,       "Leaderboard",  YELLOW),
+            (pn_rect,       "Patch Notes",  (100, 220, 160)),
+            (settings_rect, "Settings",     (140, 180, 255)),
+        ]:
+            pygame.draw.rect(screen, lerp_color(PANEL, col, 0.15), rect, border_radius=8)
+            pygame.draw.rect(screen, col, rect, 1, border_radius=8)
+            lbl = fonts["small"].render(label, True, col)
+            screen.blit(lbl, (rect.centerx - lbl.get_width() // 2,
+                               rect.centery - lbl.get_height() // 2))
+
+        cr_col = (200, 160, 255)
+        pygame.draw.rect(screen, lerp_color(PANEL, cr_col, 0.15), credits_rect, border_radius=8)
+        pygame.draw.rect(screen, cr_col, credits_rect, 1, border_radius=8)
+        cr_lbl = fonts["small"].render("Credits", True, cr_col)
+        screen.blit(cr_lbl, (credits_rect.centerx - cr_lbl.get_width() // 2,
+                              credits_rect.centery - cr_lbl.get_height() // 2))
+
+        # Play button
+        play_top = credits_rect.bottom + 12
+        if username.strip():
+            play_rect = pygame.Rect(SW // 2 - 120, play_top, 240, 52)
+            pygame.draw.rect(screen, lerp_color(PANEL, GREEN, 0.3), play_rect, border_radius=10)
+            pygame.draw.rect(screen, GREEN, play_rect, 2, border_radius=10)
+            play_lbl = fonts["large"].render("PLAY", True, GREEN)
+            screen.blit(play_lbl, (play_rect.centerx - play_lbl.get_width() // 2,
+                                   play_rect.centery - play_lbl.get_height() // 2))
+            screen.blit(fonts["small"].render("or press ENTER", True, GRAY),
+                        (SW // 2 - fonts["small"].size("or press ENTER")[0] // 2,
+                         play_rect.bottom + 10))
+        else:
+            play_rect = None
+            screen.blit(fonts["small"].render("Type your name above to continue...", True, GRAY),
+                        (SW // 2 - 170, play_top + 8))
+
+        # Rotating tip — yellow, near bottom
+        tip_s = fonts["small"].render(f"Tip: {MENU_TIPS[tip_idx]}", True, YELLOW)
+        screen.blit(tip_s, (SW // 2 - tip_s.get_width() // 2, SH - 44))
+
+        # ── Leaderboard overlay ───────────────────────────────────────────────
+        if show_lb:
+            ov = pygame.Surface((SW, SH), pygame.SRCALPHA)
+            ov.fill((0, 0, 0, 200))
+            screen.blit(ov, (0, 0))
+            lw2, lh2 = 700, 460
+            lx2 = SW // 2 - lw2 // 2; ly2 = SH // 2 - lh2 // 2
+            pygame.draw.rect(screen, PANEL,  (lx2, ly2, lw2, lh2), border_radius=14)
+            pygame.draw.rect(screen, YELLOW, (lx2, ly2, lw2, lh2), 2, border_radius=14)
+            lb.draw(screen, fonts, lx2 + 16, ly2 + 16, lw2 - 32)
+            close_hint = fonts["small"].render("Press any key or click to close", True, GRAY)
+            screen.blit(close_hint, (SW // 2 - close_hint.get_width() // 2, ly2 + lh2 - 30))
+
+        # ── Patch notes overlay ───────────────────────────────────────────────
+        if show_patchnotes:
+            ov3 = pygame.Surface((SW, SH), pygame.SRCALPHA)
+            ov3.fill((0, 0, 0, 200))
+            screen.blit(ov3, (0, 0))
+            PNW, PNH = 860, 520
+            PNX = SW // 2 - PNW // 2; PNY = SH // 2 - PNH // 2
+            PN_COL = (100, 220, 160)
+            pygame.draw.rect(screen, PANEL,  (PNX, PNY, PNW, PNH), border_radius=14)
+            pygame.draw.rect(screen, PN_COL, (PNX, PNY, PNW, PNH), 2, border_radius=14)
+
+            pn_title = fonts["large"].render("Patch Notes", True, PN_COL)
+            screen.blit(pn_title, (PNX + PNW // 2 - pn_title.get_width() // 2, PNY + 14))
+            pygame.draw.line(screen, (40, 80, 60),
+                             (PNX + 20, PNY + 50), (PNX + PNW - 20, PNY + 50), 1)
+
+            # Category colours
+            CAT_COLS = {
+                "added":   (80, 220, 120),
+                "changed": (80, 180, 255),
+                "fixed":   (255, 200, 60),
+                "removed": (220, 80, 80),
+            }
+
+            col_w   = (PNW - 60) // 2   # each patch takes half the panel width
+            y_start = PNY + 62
+
+            for pi, patch in enumerate(PATCH_NOTES):
+                cx = PNX + 20 + pi * (col_w + 20)
+                cy = y_start
+
+                # Version header
+                ver_s  = fonts["med"].render(patch["version"], True, PN_COL)
+                date_s = fonts["tiny"].render(patch["date"], True, GRAY)
+                screen.blit(ver_s,  (cx, cy))
+                screen.blit(date_s, (cx, cy + ver_s.get_height() + 2))
+                cy += ver_s.get_height() + date_s.get_height() + 10
+                pygame.draw.line(screen, (40, 80, 60),
+                                 (cx, cy), (cx + col_w, cy), 1)
+                cy += 8
+
+                for cat, text in patch["changes"]:
+                    col_c = CAT_COLS.get(cat, GRAY)
+                    tag   = fonts["tiny"].render(f"[{cat.upper()}]", True, col_c)
+                    # Word-wrap text to fit column
+                    words  = text.split()
+                    line   = ""
+                    lines  = []
+                    for word in words:
+                        test = line + (" " if line else "") + word
+                        if fonts["tiny"].size(test)[0] > col_w - tag.get_width() - 10:
+                            lines.append(line)
+                            line = word
+                        else:
+                            line = test
+                    if line:
+                        lines.append(line)
+                    for li, ln in enumerate(lines):
+                        row_y = cy + li * 16
+                        if row_y + 16 > PNY + PNH - 40:
+                            break
+                        if li == 0:
+                            screen.blit(tag, (cx, row_y))
+                            txt = fonts["tiny"].render(ln, True, WHITE)
+                            screen.blit(txt, (cx + tag.get_width() + 6, row_y))
+                        else:
+                            txt = fonts["tiny"].render(ln, True, WHITE)
+                            screen.blit(txt, (cx + tag.get_width() + 6, row_y))
+                    cy += len(lines) * 16 + 4
+
+            close_pn = fonts["small"].render("Press any key or click to close", True, GRAY)
+            screen.blit(close_pn, (SW // 2 - close_pn.get_width() // 2, PNY + PNH - 28))
+
+        # ── Credits overlay ───────────────────────────────────────────────────
+        if show_credits:
+            CR_COL   = (200, 160, 255)
+            CRW      = 640
+            MIN_H    = 420
+            MAX_H    = SH - 80
+            BODY_PAD = 20   # horizontal padding inside panel
+            ROW_SEC  = fonts["med"].get_linesize() + 6
+            ROW_NAME = fonts["small"].get_linesize() + 4
+            ROW_GAP  = 18   # gap after each section
+            FOOTER_H = 52   # space for navigation hint at bottom
+            HEADER_H = 58   # title + divider
+
+            # Build flat list of (type, text) rows from CREDITS
+            all_rows = []
+            for section, names in CREDITS.items():
+                all_rows.append(("section", section))
+                for name in names:
+                    all_rows.append(("name", name))
+                all_rows.append(("gap", ""))
+
+            # Measure how many rows fit per page
+            usable_h = MAX_H - HEADER_H - FOOTER_H
+            rows_per_page = []
+            h_used = 0
+            page_rows = []
+            for row in all_rows:
+                rh = ROW_SEC if row[0] == "section" else (ROW_NAME if row[0] == "name" else ROW_GAP)
+                if h_used + rh > usable_h and page_rows:
+                    rows_per_page.append(page_rows)
+                    page_rows = [row]
+                    h_used    = rh
+                else:
+                    page_rows.append(row)
+                    h_used += rh
+            if page_rows:
+                rows_per_page.append(page_rows)
+
+            total_pages = max(1, len(rows_per_page))
+            credits_page = max(0, min(credits_page, total_pages - 1))
+
+            # Compute actual content height for this page
+            page = rows_per_page[credits_page] if rows_per_page else []
+            content_h = sum(
+                ROW_SEC if r[0] == "section" else (ROW_NAME if r[0] == "name" else ROW_GAP)
+                for r in page)
+            CRH = max(MIN_H, HEADER_H + content_h + FOOTER_H + BODY_PAD)
+            CRH = min(CRH, MAX_H)
+            CRX = SW // 2 - CRW // 2
+            CRY = SH // 2 - CRH // 2
+
+            ov4 = pygame.Surface((SW, SH), pygame.SRCALPHA)
+            ov4.fill((0, 0, 0, 210))
+            screen.blit(ov4, (0, 0))
+            pygame.draw.rect(screen, PANEL,  (CRX, CRY, CRW, CRH), border_radius=14)
+            pygame.draw.rect(screen, CR_COL, (CRX, CRY, CRW, CRH), 2, border_radius=14)
+
+            cr_title = fonts["large"].render("Credits", True, CR_COL)
+            screen.blit(cr_title, (CRX + CRW // 2 - cr_title.get_width() // 2, CRY + 14))
+            pygame.draw.line(screen, (80, 60, 120),
+                             (CRX + 20, CRY + 50), (CRX + CRW - 20, CRY + 50), 1)
+
+            # Draw rows for current page
+            cy2 = CRY + HEADER_H
+            for rtype, rtext in page:
+                if rtype == "section":
+                    sec_s = fonts["med"].render(rtext, True, CR_COL)
+                    screen.blit(sec_s, (CRX + CRW // 2 - sec_s.get_width() // 2, cy2))
+                    cy2 += ROW_SEC
+                elif rtype == "name":
+                    nm_s = fonts["small"].render(rtext, True, WHITE)
+                    screen.blit(nm_s, (CRX + CRW // 2 - nm_s.get_width() // 2, cy2))
+                    cy2 += ROW_NAME
+                else:
+                    pygame.draw.line(screen, (50, 40, 70),
+                                     (CRX + 40, cy2 + ROW_GAP // 2),
+                                     (CRX + CRW - 40, cy2 + ROW_GAP // 2), 1)
+                    cy2 += ROW_GAP
+
+            # Footer: page nav + close hint
+            footer_y = CRY + CRH - FOOTER_H + 8
+            if total_pages > 1:
+                prev_col = CR_COL if credits_page > 0 else GRAY
+                next_col = CR_COL if credits_page < total_pages - 1 else GRAY
+                prev_s = fonts["small"].render("< Prev", True, prev_col)
+                next_s = fonts["small"].render("Next >", True, next_col)
+                page_s = fonts["small"].render(f"{credits_page + 1} / {total_pages}", True, WHITE)
+                screen.blit(prev_s, (CRX + 20, footer_y))
+                screen.blit(page_s, (CRX + CRW // 2 - page_s.get_width() // 2, footer_y))
+                screen.blit(next_s, (CRX + CRW - next_s.get_width() - 20, footer_y))
+            hint_y = footer_y + fonts["small"].get_linesize() + 4
+            close_cr = fonts["small"].render(
+                "Arrow keys to page  |  Any other key or click to close", True, GRAY)
+            screen.blit(close_cr, (CRX + CRW // 2 - close_cr.get_width() // 2, hint_y))
+        if show_settings:
+            ov2 = pygame.Surface((SW, SH), pygame.SRCALPHA)
+            ov2.fill((0, 0, 0, 180))
+            screen.blit(ov2, (0, 0))
+
+            pygame.draw.rect(screen, PANEL,           (SP_X, SP_Y, SP_W, SP_H), border_radius=14)
+            pygame.draw.rect(screen, (140, 180, 255), (SP_X, SP_Y, SP_W, SP_H), 2, border_radius=14)
+
+            stitle = fonts["large"].render("Settings", True, (140, 180, 255))
+            screen.blit(stitle, (SP_X + SP_W // 2 - stitle.get_width() // 2, SP_Y + 18))
+            pygame.draw.line(screen, (60, 60, 90), (SP_X + 20, SP_Y + 55), (SP_X + SP_W - 20, SP_Y + 55), 1)
+
+            def _draw_slider(label, vol, sy):
+                lbl = fonts["med"].render(label, True, WHITE)
+                screen.blit(lbl, (SP_X + 20, sy - 32))
+                pct = fonts["med"].render(f"{int(vol * 100)}%", True, CYAN)
+                screen.blit(pct, (SP_X + SP_W - 20 - pct.get_width(), sy - 32))
+                pygame.draw.rect(screen, (50, 50, 70), (SLIDER_X, sy - 4, SLIDER_W, 8), border_radius=4)
+                fw = int(vol * SLIDER_W)
+                if fw > 0:
+                    pygame.draw.rect(screen, CYAN, (SLIDER_X, sy - 4, fw, 8), border_radius=4)
+                kx = int(SLIDER_X + vol * SLIDER_W)
+                pygame.draw.circle(screen, WHITE, (kx, sy), 12)
+                pygame.draw.circle(screen, CYAN,  (kx, sy), 10)
+                pygame.draw.circle(screen, WHITE, (kx, sy), 10, 2)
+                for t in (0.0, 0.25, 0.5, 0.75, 1.0):
+                    tx = int(SLIDER_X + t * SLIDER_W)
+                    pygame.draw.line(screen, (80, 80, 100), (tx, sy + 14), (tx, sy + 20), 1)
+
+            _draw_slider("Music Volume",  MUSIC.volume,  SLIDER_Y)
+            pygame.draw.line(screen, (45, 45, 65),
+                             (SP_X + 20, SLIDER_Y + 28), (SP_X + SP_W - 20, SLIDER_Y + 28), 1)
+            _draw_slider("Sound Effects", SOUNDS.volume, SLIDER2_Y)
+            pygame.draw.line(screen, (45, 45, 65),
+                             (SP_X + 20, SLIDER2_Y + 28), (SP_X + SP_W - 20, SLIDER2_Y + 28), 1)
+
+            # Quality toggle
+            qlbl = fonts["med"].render("Quality", True, WHITE)
+            screen.blit(qlbl, (SP_X + 20, QUALITY_Y + 8))
+            btn_w2 = (SP_W - 60) // 2
+            for qi, (qlabel, qval) in enumerate([("Low", "low"), ("High", "high")]):
+                qx   = SP_X + SP_W // 2 - btn_w2 + qi * (btn_w2 + 10)
+                active_q = GAME_SETTINGS.quality == qval
+                qcol = (100, 220, 100) if qval == "high" else (220, 160, 60)
+                qbg  = lerp_color(PANEL, qcol, 0.3 if active_q else 0.05)
+                pygame.draw.rect(screen, qbg,  (qx, QUALITY_Y, btn_w2, 36), border_radius=8)
+                pygame.draw.rect(screen, qcol if active_q else GRAY,
+                                 (qx, QUALITY_Y, btn_w2, 36), 2 if active_q else 1, border_radius=8)
+                qt = fonts["med"].render(qlabel, True, qcol if active_q else GRAY)
+                screen.blit(qt, (qx + btn_w2 // 2 - qt.get_width() // 2,
+                                 QUALITY_Y + 18 - qt.get_height() // 2))
+
+            close_h = fonts["small"].render("Click outside or press ESC / ENTER to close", True, GRAY)
+            screen.blit(close_h, (SP_X + SP_W // 2 - close_h.get_width() // 2, SP_Y + SP_H - 28))
+
+        # Version label bottom-centre of menu screen
+        ver_menu = fonts["tiny"].render(GAME_VERSION, True, (55, 55, 70))
+        screen.blit(ver_menu, (SW // 2 - ver_menu.get_width() // 2, SH - 18))
+
+        # Red X close button — top right corner
+        mx_now2, my_now2 = pygame.mouse.get_pos()
+        x_hovered = close_rect.collidepoint(mx_now2, my_now2)
+        x_bg  = (180, 30, 30) if x_hovered else (100, 20, 20)
+        x_brd = (255, 80, 80) if x_hovered else (160, 40, 40)
+        pygame.draw.rect(screen, x_bg,  close_rect, border_radius=6)
+        pygame.draw.rect(screen, x_brd, close_rect, 1, border_radius=6)
+        cx2 = close_rect.centerx; cy2 = close_rect.centery; arm = 8
+        pygame.draw.line(screen, (255, 120, 120), (cx2 - arm, cy2 - arm), (cx2 + arm, cy2 + arm), 2)
+        pygame.draw.line(screen, (255, 120, 120), (cx2 + arm, cy2 - arm), (cx2 - arm, cy2 + arm), 2)
+
+        # ── Tutorial overlay ──────────────────────────────────────────────────
+        if show_tutorial:
+            TW, TH = 720, 480
+            TX = SW // 2 - TW // 2; TY = SH // 2 - TH // 2
+
+            tov = pygame.Surface((SW, SH), pygame.SRCALPHA)
+            tov.fill((0, 0, 0, 200))
+            screen.blit(tov, (0, 0))
+
+            pygame.draw.rect(screen, PANEL, (TX, TY, TW, TH), border_radius=14)
+            pygame.draw.rect(screen, CYAN,  (TX, TY, TW, TH), 2, border_radius=14)
+
+            ttitle = fonts["large"].render("Welcome to Dungeon Crawler!", True, CYAN)
+            screen.blit(ttitle, (TX + TW // 2 - ttitle.get_width() // 2, TY + 16))
+            pygame.draw.line(screen, (50, 50, 80), (TX + 16, TY + 50), (TX + TW - 16, TY + 50), 1)
+
+            # Page dots
+            for pi in range(2):
+                dot_col = CYAN if pi == tutorial_page else (60, 60, 80)
+                pygame.draw.circle(screen, dot_col,
+                                   (TX + TW // 2 - 10 + pi * 20, TY + 60), 5)
+
+            if tutorial_page == 0:
+                pg_title = fonts["med"].render("Controls", True, YELLOW)
+                screen.blit(pg_title, (TX + TW // 2 - pg_title.get_width() // 2, TY + 72))
+
+                controls = [
+                    ("Movement",     "WASD  /  Arrow Keys"),
+                    ("Shoot",        "Left Mouse Button (aim with cursor)"),
+                    ("Dash",         "Space"),
+                    ("Open Shop",    "TAB"),
+                    ("Pause",        "P or ESC"),
+                    ("Heal (Shop)",  "H in the shop (250g, +10 HP)"),
+                ]
+                for ri, (label, value) in enumerate(controls):
+                    ry = TY + 110 + ri * 46
+                    pygame.draw.rect(screen, (35, 35, 52),
+                                     (TX + 20, ry, TW - 40, 38), border_radius=6)
+                    pygame.draw.rect(screen, (55, 55, 80),
+                                     (TX + 20, ry, TW - 40, 38), 1, border_radius=6)
+                    lbl_s = fonts["small"].render(label, True, (160, 200, 255))
+                    val_s = fonts["small"].render(value, True, WHITE)
+                    screen.blit(lbl_s, (TX + 34, ry + 10))
+                    screen.blit(val_s, (TX + 200, ry + 10))
+            else:
+                pg_title = fonts["med"].render("Game Mechanics", True, YELLOW)
+                screen.blit(pg_title, (TX + TW // 2 - pg_title.get_width() // 2, TY + 72))
+
+                mechanics = [
+                    ("Waves",       "Survive endless waves of enemies. Every 10th wave is a Boss wave."),
+                    ("Gold & Shop", "Enemies drop gold - buy new weapons in the shop with TAB."),
+                    ("Tokens",      "Defeat bosses to earn Tokens - spend them on cosmetics."),
+                    ("Perks",       "Every 5 waves pick 1 of 3 perk cards to boost your stats."),
+                    ("Corruption",  "Some waves are Corruption waves - harder enemies, better loot."),
+                    ("Level Up",    "Kill enemies for XP. Higher level = more HP and damage."),
+                ]
+                for ri, (label, value) in enumerate(mechanics):
+                    ry = TY + 110 + ri * 46
+                    pygame.draw.rect(screen, (35, 35, 52),
+                                     (TX + 20, ry, TW - 40, 38), border_radius=6)
+                    pygame.draw.rect(screen, (55, 55, 80),
+                                     (TX + 20, ry, TW - 40, 38), 1, border_radius=6)
+                    lbl_s = fonts["small"].render(label, True, (160, 200, 255))
+                    val_s = fonts["tiny"].render(value, True, WHITE)
+                    screen.blit(lbl_s, (TX + 34, ry + 10))
+                    screen.blit(val_s, (TX + 175, ry + 12))
+
+            next_btn = pygame.Rect(TX + TW - 180, TY + TH - 56, 160, 40)
+            prev_btn = pygame.Rect(TX + 20,        TY + TH - 56, 160, 40)
+
+            if tutorial_page == 1:
+                pygame.draw.rect(screen, lerp_color(PANEL, (80, 200, 80), 0.25),
+                                 prev_btn, border_radius=8)
+                pygame.draw.rect(screen, (80, 150, 80), prev_btn, 1, border_radius=8)
+                pb_lbl = fonts["med"].render("◄ Back", True, (150, 220, 150))
+                screen.blit(pb_lbl, (prev_btn.centerx - pb_lbl.get_width() // 2,
+                                     prev_btn.centery - pb_lbl.get_height() // 2))
+
+            btn_label = "Next ►" if tutorial_page == 0 else "Got it!  ►"
+            btn_col   = CYAN if tutorial_page == 0 else GREEN
+            pygame.draw.rect(screen, lerp_color(PANEL, btn_col, 0.25),
+                             next_btn, border_radius=8)
+            pygame.draw.rect(screen, btn_col, next_btn, 2, border_radius=8)
+            nb_lbl = fonts["med"].render(btn_label, True, btn_col)
+            screen.blit(nb_lbl, (next_btn.centerx - nb_lbl.get_width() // 2,
+                                  next_btn.centery - nb_lbl.get_height() // 2))
+
+            hint_t = fonts["tiny"].render(
+                "◄/► or A/D to navigate  |  ENTER on last page to start", True, GRAY)
+            screen.blit(hint_t, (TX + TW // 2 - hint_t.get_width() // 2, TY + TH - 16))
+
+        pygame.display.flip()
+
+# ── Main Game ─────────────────────────────────────────────────────────────────
+
+class Game:
+    def __init__(self, username="Player"):
+        self.screen   = pygame.display.set_mode((SW, SH))
+        self._overlay = pygame.Surface((SW, SH), pygame.SRCALPHA)  # reused every frame
+        pygame.display.set_caption("Dungeon Crawler 37.0b9")
+        self.clock    = pygame.time.Clock()
+        self.world_w  = 3000; self.world_h = 3000
+        self.username = username
+        self.fonts    = {
+            "large": pygame.font.SysFont("consolas", 28, bold=True),
+            "med":   pygame.font.SysFont("consolas", 20, bold=True),
+            "small": pygame.font.SysFont("consolas", 15),
+            "tiny":  pygame.font.SysFont("consolas", 13),
+            "huge":  pygame.font.SysFont("consolas", 48, bold=True),
+        }
+        self.leaderboard = Leaderboard()
+        self.lb_rank     = None   # rank achieved this run (set on death)
+        self.reset()
+        MUSIC.play("battle")
+
+    def reset(self):
+        self.player         = Player(self.world_w // 2, self.world_h // 2, self.username)
+        self.enemies        = []
+        self.projectiles    = []
+        self.particles      = []
+        self.floating_texts = []
+        self.gold_coins     = []
+        self.fire_orbs      = []
+        self.shop           = Shop()
+        self.perk_screen    = PerkScreen(self.player, self.fonts)
+        self.game_over      = False
+        self.paused         = False
+        self.lb_rank        = None
+        self.pause_settings  = False
+        self.pause_slider_drag = False
+        self.pause_dev       = False
+        self.pause_dev_input = ""    # password entry buffer
+        self.pause_dev_prompt = False  # password prompt visible
+        self.dev_boss_expand  = False  # True when boss-pick sub-menu is open
+        # Boss state
+        self.boss           = None
+        self.boss_clone     = None   # Vexara phase-2 clone
+        self.boss_intro     = None   # BossIntro cinematic, None when inactive
+        self.boss_wave      = False   # True while boss is alive this wave
+        self.boss_pool      = list(range(len(BOSS_TYPES)))
+        random.shuffle(self.boss_pool)
+        self.boss_pool_idx  = 0
+        self.boss_killed    = 0
+        # Wave system
+        self.wave              = 1
+        self.wave_active       = True
+        self.wave_enemy_count  = 0
+        self.wave_enemy_target = self._wave_size(1)
+        self.spawn_timer       = 0
+        self.spawn_interval    = 90
+        self.break_timer       = 0
+        self.elite_wave             = False   # True when current wave is a corruption wave
+        self.corruption_flash_timer = 0       # frames of screen flash on corruption wave start
+        self.corruption_zaps        = []      # list of active zig-zag lines: [pts, life, max_life]
+        self.corruption_zap_cd      = 0       # countdown until next zap spawns
+        # Vexara arena visuals
+        self.vex_zaps               = []      # intense zap lines during Vexara boss wave
+        self.vex_zap_cd             = 0
+        self.vex_runes              = []      # slow drifting hex rune shapes [wx, wy, angle, spin, life, max_life]
+        self.vex_rune_cd            = 0
+        # Nyxoth arena visuals
+        self.nyx_stars              = []      # static star field [sx, sy, radius, brightness]
+        self.nyx_nebulas            = []      # drifting nebula blobs [wx, wy, r, col, alpha]
+        self.nyx_bombs              = []      # active NyxFireBomb objects
+        # Malachar arena visuals
+        self.mal_lava_flows         = []      # world-space lava rivers [[pts], width, phase]
+        self.mal_embers             = []      # floating ember particles [wx,wy,vx,vy,life,max_life]
+        self.mal_ember_cd           = 0
+        self.death_anim_timer       = 0       # > 0 while death animation plays
+        self.death_particles        = []      # list of [x, y, vx, vy, life, max_life, col]
+        # Spawn first handful
+        for _ in range(min(4, self.wave_enemy_target)):
+            self.spawn_enemy()
+            self.wave_enemy_count += 1
+
+    def _wave_size(self, wave):
+        return 6 + wave * 3
+
+    def _spawn_boss(self):
+        idx  = self.boss_pool[self.boss_pool_idx % len(self.boss_pool)]
+        self.boss_pool_idx += 1
+        # Spawn off-screen from player
+        ang  = random.uniform(0, math.pi * 2)
+        bx   = self.player.x + math.cos(ang) * 600
+        by   = self.player.y + math.sin(ang) * 600
+        bx   = max(80, min(self.world_w - 80, bx))
+        by   = max(80, min(self.world_h - 80, by))
+        self.boss = Boss(bx, by, idx, self.player.level)
+        bt   = BOSS_TYPES[idx]
+        MUSIC.play_boss(bt["name"])
+        self.boss_intro = BossIntro(self.boss, self.fonts)
+        self.floating_texts.append(
+            FloatingText(self.player.x, self.player.y - 100,
+                         f"BOSS: {bt['name']}!", (255, 60, 60), 26))
+        # Generate Nyxoth space arena
+        if bt["pattern"] == "homing":
+            self.nyx_bombs = []
+            # Stars: random screen-space positions (regenerated each frame relative to cam)
+            self.nyx_stars = [
+                (random.randint(0, SW), random.randint(0, SH),
+                 random.randint(1, 3), random.uniform(0.4, 1.0))
+                for _ in range(180)
+            ]
+            # Nebulas: world-space blobs that stay fixed in the arena
+            neb_cols = [
+                (60, 0, 120), (0, 20, 80), (80, 0, 60),
+                (20, 0, 100), (40, 10, 70), (0, 30, 90),
+            ]
+            self.nyx_nebulas = [
+                (random.randint(200, self.world_w - 200),
+                 random.randint(200, self.world_h - 200),
+                 random.randint(80, 200),
+                 random.choice(neb_cols),
+                 random.randint(30, 70))
+                for _ in range(28)
+            ]
+
+        # Generate Malachar lava arena
+        if bt["pattern"] == "charge":
+            self.mal_embers   = []
+            self.mal_ember_cd = 0
+            self.mal_lava_flows = []
+            for _ in range(32):
+                fx  = random.randint(0, self.world_w)
+                fy  = random.randint(0, self.world_h)
+                pts = [(fx, fy)]
+                ang = random.uniform(0, math.pi * 2)
+                sl  = random.randint(180, 380)   # much longer segments
+                for _ in range(random.randint(12, 22)):   # more segments
+                    ang += random.uniform(-0.4, 0.4)      # gentler bends = longer reach
+                    fx = max(0, min(self.world_w, fx + math.cos(ang) * sl))
+                    fy = max(0, min(self.world_h, fy + math.sin(ang) * sl))
+                    pts.append((fx, fy))
+                self.mal_lava_flows.append(
+                    [pts, random.randint(10, 28), random.uniform(0, math.pi * 2)])
+
+    def _on_boss_killed(self):
+        b = self.boss
+        self.boss_killed += 1
+        TOKENS.earn(1)   # +1 persistent token per boss kill
+        if b.name == "Seraphix the Fallen":
+            TOKENS.record_seraphix_kill()
+        if b.name == "Nyxoth the Abyssal":
+            TOKENS.record_nyxoth_kill()
+        self.floating_texts.append(
+            FloatingText(b.x, b.y - 130, "+1 Token!", (255, 200, 60), 22))
+        self.wave_active  = False
+        self.boss_wave    = False
+        self.boss_clone   = None
+        self.break_timer  = WAVE_BREAK_SECS * FPS
+        self.nyx_bombs    = []
+        self.nyx_stars    = []
+        self.nyx_nebulas  = []
+        self.mal_lava_flows = []
+        self.mal_embers   = []
+        # Clear all lingering enemy projectiles so the player can't be hit after the kill
+        self.projectiles = [p for p in self.projectiles if p.owner == "player"]
+        self.fire_orbs   = []
+        MUSIC.play("battle")
+        SOUNDS.play("boss_death")
+        # Big gold + XP reward
+        for _ in range(12):
+            self.gold_coins.append(GoldCoin(b.x, b.y, b.gold_drop // 12))
+        self.floating_texts.append(
+            FloatingText(b.x, b.y - 60, f"BOSS SLAIN! +{b.gold_drop}g", YELLOW, 26))
+        self.floating_texts.append(
+            FloatingText(b.x, b.y - 100, f"Wave {self.wave} cleared!", GREEN, 24))
+        for _ in range(40):
+            self.particles.append(Particle(b.x, b.y, b.color))
+            self.particles.append(Particle(b.x, b.y, YELLOW))
+        if self.player.gain_xp(b.xp_drop):
+            self.floating_texts.append(
+                FloatingText(self.player.x, self.player.y - 60,
+                             f"LEVEL UP!  {self.player.level}", CYAN, 22))
+        # Always offer a perk after a boss
+        self.perk_screen.offer()
+
+    def _skip_wave(self):
+        """Dev tool: instantly end the current wave/boss and jump to the break."""
+        # Clear all living enemies and their projectiles
+        for e in self.enemies:
+            e.alive = False
+        self.enemies = []
+        self.fire_orbs = []
+
+        # Kill boss intro and boss if present
+        if self.boss_intro and self.boss_intro.active:
+            self.boss_intro.done = True
+            self.boss_intro = None
+        if self.boss and self.boss.alive:
+            self.boss.alive = False
+            self.boss_killed += 1
+            self.boss.minions = []
+
+        # Clear all enemy projectiles
+        self.projectiles = [p for p in self.projectiles if p.owner == "player"]
+
+        # End the wave and start a break
+        # Credit corruption wave if one was active when skipped
+        if self.elite_wave:
+            self.player.corruption_waves_cleared += 1
+            self.floating_texts.append(
+                FloatingText(self.player.x, self.player.y - 110,
+                             f"Corruption Wave cleared!  ({self.player.corruption_waves_cleared} total)",
+                             (220, 80, 255), 20))
+        self.wave_active            = False
+        self.boss_wave              = False
+        self.boss                   = None
+        self.boss_clone             = None
+        self.elite_wave             = False
+        self.corruption_flash_timer = 0
+        self.break_timer            = WAVE_BREAK_SECS * FPS
+        self.wave_enemy_count  = self.wave_enemy_target   # mark as fully spawned
+
+        MUSIC.play("battle")
+        self.floating_texts.append(
+            FloatingText(self.player.x, self.player.y - 80,
+                         f"[DEV] Wave {self.wave} skipped!", (255, 160, 40), 22))
+
+    def _skip_to_boss(self, btype_idx):
+        """Dev tool: skip to a break that leads directly into a specific boss wave."""
+        self._skip_wave()
+        # The break timer will fire and do self.wave += 1, then check wave % 10 == 0.
+        # So we set self.wave to one below the next multiple of 10 from current wave.
+        next_boss_wave = (self.wave // 10 + 1) * 10
+        self.wave = next_boss_wave - 1   # +1 happens at break end → hits the multiple
+        # Front-load the desired boss in the pool
+        self.boss_pool     = [btype_idx] + [j for j in range(len(BOSS_TYPES)) if j != btype_idx]
+        self.boss_pool_idx = 0
+        bt = BOSS_TYPES[btype_idx]
+        self.floating_texts.append(
+            FloatingText(self.player.x, self.player.y - 110,
+                         f"[DEV] Next boss: {bt['name']}!", (255, 120, 200), 22))
+
+    def spawn_enemy(self):
+        p       = self.player
+        lvl     = p.level
+        weights = [30, max(0, 20 + lvl * 2), max(0, 10 + lvl * 3),
+                   max(0, 5 + lvl * 2),       max(0, min(20, (lvl - 8) * 2))]
+        total   = sum(weights) or 1
+        weights = [w / total for w in weights]
+        r = random.random(); cum = 0; etype = 0
+        for i, w in enumerate(weights):
+            cum += w
+            if r <= cum:
+                etype = i; break
+        for _ in range(20):
+            angle = random.uniform(0, math.pi * 2)
+            dist  = random.uniform(400, 800)
+            ex = p.x + math.cos(angle) * dist
+            ey = p.y + math.sin(angle) * dist
+            if 50 < ex < self.world_w - 50 and 50 < ey < self.world_h - 50:
+                self.enemies.append(Enemy(ex, ey, etype, max(1, lvl), is_elite=self.elite_wave))
+                return
+        self.enemies.append(Enemy(
+            random.randint(100, self.world_w - 100),
+            random.randint(100, self.world_h - 100),
+            etype, max(1, lvl), is_elite=self.elite_wave))
+
+    def get_camera(self):
+        cx = max(0, min(self.world_w - SW, int(self.player.x - SW // 2)))
+        cy = max(0, min(self.world_h - SH, int(self.player.y - SH // 2)))
+        return (cx, cy)
+
+    def draw_world(self, cam):
+        is_vexara  = (self.boss_wave and self.boss and
+                      getattr(self.boss, 'pattern', None) == "spiral")
+        is_nyxoth  = (self.boss_wave and self.boss and
+                      getattr(self.boss, 'pattern', None) == "homing")
+        is_malachar = (self.boss_wave and self.boss and
+                       getattr(self.boss, 'pattern', None) == "charge")
+        # Base background colour
+        if self.elite_wave:
+            self.screen.fill((28, 16, 42))
+        elif is_vexara:
+            self.screen.fill((20, 10, 36))
+        elif is_nyxoth:
+            self.screen.fill((0, 0, 0))
+        elif is_malachar:
+            self.screen.fill((18, 6, 2))   # deep dark red-black base
+        else:
+            self.screen.fill((22, 22, 35))
+        if not is_malachar:
+            tile = 64
+            ox = cam[0] % tile; oy = cam[1] % tile
+            if self.elite_wave:
+                tile_col = (30, 18, 48)
+            elif is_vexara:
+                tile_col = (24, 12, 44)
+            elif is_nyxoth:
+                tile_col = (4, 4, 10)
+            else:
+                tile_col = (26, 26, 40)
+            for gx in range(-1, SW // tile + 2):
+                for gy in range(-1, SH // tile + 2):
+                    pygame.draw.rect(self.screen, tile_col,
+                                     (gx * tile - ox, gy * tile - oy, tile - 1, tile - 1))
+
+        # Nyxoth: draw nebulas
+        if is_nyxoth:
+            for wx, wy, r, col, alpha in self.nyx_nebulas:
+                nsx = int(wx - cam[0]); nsy = int(wy - cam[1])
+                if -r < nsx < SW + r and -r < nsy < SH + r:
+                    for layer in range(3):
+                        lr = max(1, int(r * (1 - layer * 0.28)))
+                        la = max(0, alpha - layer * 18)
+                        lc = lerp_color(col, (0, 0, 0), layer * 0.3)
+                        ns = pygame.Surface((lr * 2 + 4, lr * 2 + 4), pygame.SRCALPHA)
+                        pygame.draw.circle(ns, (*lc, la), (lr + 2, lr + 2), lr)
+                        self.screen.blit(ns, (nsx - lr - 2, nsy - lr - 2))
+
+        # Malachar: draw lava flow rivers
+        if is_malachar:
+            t_lava = pygame.time.get_ticks()
+            for flow_pts, flow_w, phase in self.mal_lava_flows:
+                screen_pts = [(int(wx - cam[0]), int(wy - cam[1])) for wx, wy in flow_pts]
+                # Cheap cull — skip if no point near screen
+                if not any(-200 < sx2 < SW + 200 and -200 < sy2 < SH + 200
+                           for sx2, sy2 in screen_pts):
+                    continue
+                if len(screen_pts) < 2:
+                    continue
+                glow = math.sin(t_lava * 0.003 + phase) * 0.5 + 0.5
+                # 2 passes: crust then bright core (inner highlight removed — core is bright enough)
+                lava_outer = (max(0, min(255, int(60 + 40 * glow))),
+                              max(0, min(255, int(20 + 10 * glow))), 0)
+                lava_core  = (max(0, min(255, int(200 + 55 * glow))),
+                              max(0, min(255, int(80 + 80 * glow))),
+                              max(0, min(255, int(20 * glow))))
+                pygame.draw.lines(self.screen, lava_outer, False, screen_pts, flow_w + 4)
+                pygame.draw.lines(self.screen, lava_core,  False, screen_pts, max(2, flow_w - 2))
+
+        pygame.draw.rect(self.screen, RED, (-cam[0], -cam[1], self.world_w, self.world_h), 4)
+
+    def draw_hud(self):
+        p = self.player
+
+        # Calculate panel height: base 178 (includes dash bar rows) + 18px per active perk
+        active_perks = [(k, v) for k, v in p.perks.items() if v > 0]
+        panel_h = 178 + (len(active_perks) * 17 + 10 if active_perks else 0)
+
+        # Left panel
+        pygame.draw.rect(self.screen, PANEL, (0, 0, 250, panel_h), border_radius=8)
+        pygame.draw.rect(self.screen, CYAN,  (0, 0, 250, panel_h), 1, border_radius=8)
+        self.screen.blit(self.fonts["large"].render(f"Lvl {p.level}", True, YELLOW), (12, 8))
+        self.screen.blit(self.fonts["small"].render(f"Kills: {p.kill_count}", True, WHITE), (120, 14))
+        draw_bar(self.screen, 10, 42, 230, 16, p.hp, p.max_hp, (50, 220, 80))
+        self.screen.blit(self.fonts["small"].render(f"HP {p.hp}/{p.max_hp}", True, WHITE), (12, 44))
+        if p.level >= p.LEVEL_CAP:
+            draw_bar(self.screen, 10, 66, 230, 12, 1, 1, BLUE)
+            self.screen.blit(self.fonts["tiny"].render("XP  MAX LEVEL", True, (180, 180, 255)), (12, 68))
+        else:
+            draw_bar(self.screen, 10, 66, 230, 12, p.xp, p.xp_to_next, BLUE)
+            self.screen.blit(self.fonts["tiny"].render(f"XP {p.xp}/{p.xp_to_next}", True, (180, 180, 255)), (12, 68))
+        # Gold and tokens on same line, weapon name below
+        self.screen.blit(self.fonts["med"].render(f"Gold: {p.gold}", True, YELLOW), (12, 86))
+        # Token coin icon + count, right-aligned on same line as gold
+        tok_hud = self.fonts["small"].render(str(TOKENS.total), True, (255, 200, 60))
+        num_x   = 238 - tok_hud.get_width()
+        draw_token_coin(self.screen, num_x - 12, 94, 8)
+        self.screen.blit(tok_hud, (num_x, 89))
+        self.screen.blit(self.fonts["small"].render(f"  {p.weapon['name']}", True, p.weapon["color"]), (12, 108))
+
+        # Dash charge indicators
+        DASH_COL     = (80, 220, 255)
+        DASH_RDY_COL = (40, 160, 200)
+        max_ch = p._dash_max_charges()
+        dash_cd_val = p._dash_cd()
+        bar_w = 230 // max_ch - 4
+        for i in range(max_ch):
+            bx = 10 + i * (bar_w + 4)
+            charge_ready = (i < len(p.dash_cds) and p.dash_cds[i] <= 0)
+            if charge_ready:
+                pygame.draw.rect(self.screen, DASH_COL, (bx, 146, bar_w, 10), border_radius=3)
+            else:
+                cd_val = p.dash_cds[i] if i < len(p.dash_cds) else dash_cd_val
+                fill = max(0, int(bar_w * (1 - cd_val / dash_cd_val)))
+                pygame.draw.rect(self.screen, (30, 50, 60), (bx, 146, bar_w, 10), border_radius=3)
+                if fill > 0:
+                    pygame.draw.rect(self.screen, DASH_RDY_COL, (bx, 146, fill, 10), border_radius=3)
+                pygame.draw.rect(self.screen, (50, 100, 120), (bx, 146, bar_w, 10), 1, border_radius=3)
+        dash_lbl = self.fonts["tiny"].render("DASH [SPACE]", True, DASH_COL)
+        self.screen.blit(dash_lbl, (10, 160))
+
+        # Active perks section
+        if active_perks:
+            pygame.draw.line(self.screen, (60, 60, 80), (8, 176), (242, 176), 1)
+            for i, (key, val) in enumerate(active_perks):
+                pdef   = next((pd for pd in ALL_PERKS if pd["key"] == key), None)
+                if not pdef:
+                    continue
+                stacks = int(val / pdef["bonus"] + 0.5)
+                label  = pdef["label"]
+                col    = pdef["color"]
+                # Format value correctly: regen is raw HP, dash is stacks, others are percentages
+                if key == "hp_regen":
+                    val_str = f"+{int(val)} HP/3s"
+                elif key == "dash":
+                    val_str = f"x{stacks} upgraded"
+                else:
+                    val_str = f"+{int(val * 100)}%"
+                pygame.draw.circle(self.screen, col, (18, 185 + i * 17), 4)
+                txt = self.fonts["tiny"].render(f"{label}  {val_str}  (x{stacks})", True, col)
+                self.screen.blit(txt, (28, 178 + i * 17))
+
+        # Minimap
+        mm = 120; mm_x = SW - mm - 10; mm_y = 10
+        pygame.draw.rect(self.screen, (20, 20, 35), (mm_x, mm_y, mm, mm))
+        pygame.draw.rect(self.screen, GRAY,         (mm_x, mm_y, mm, mm), 1)
+        pygame.draw.circle(self.screen, CYAN,
+                           (mm_x + int(p.x / self.world_w * mm),
+                            mm_y + int(p.y / self.world_h * mm)), 3)
+        for e in self.enemies:
+            if e.alive:
+                pygame.draw.circle(self.screen, RED,
+                                   (mm_x + int(e.x / self.world_w * mm),
+                                    mm_y + int(e.y / self.world_h * mm)), 2)
+        for gc in self.gold_coins:
+            pygame.draw.circle(self.screen, YELLOW,
+                               (mm_x + int(gc.x / self.world_w * mm),
+                                mm_y + int(gc.y / self.world_h * mm)), 1)
+        if self.boss and self.boss.alive:
+            pygame.draw.circle(self.screen, (255, 60, 60),
+                               (mm_x + int(self.boss.x / self.world_w * mm),
+                                mm_y + int(self.boss.y / self.world_h * mm)), 5)
+            pygame.draw.circle(self.screen, WHITE,
+                               (mm_x + int(self.boss.x / self.world_w * mm),
+                                mm_y + int(self.boss.y / self.world_h * mm)), 5, 1)
+        self.screen.blit(self.fonts["tiny"].render("MAP", True, GRAY),
+                         (mm_x + mm // 2 - 10, mm_y + mm + 2))
+
+        # Wave status (top centre)
+        if self.wave_active:
+            if self.boss_wave and self.boss and self.boss.alive:
+                wave_txt = self.fonts["med"].render(
+                    f"BOSS WAVE {self.wave}  —  {self.boss.name}", True, (255, 60, 60))
+            else:
+                alive = sum(1 for e in self.enemies if e.alive)
+                wave_txt = self.fonts["med"].render(f"Wave {self.wave}  |  Enemies: {alive}", True, RED)
+            self.screen.blit(wave_txt, (SW // 2 - wave_txt.get_width() // 2, 8))
+            if not self.boss_wave:
+                waves_to_perk = 5 - (self.wave % 5)
+                if waves_to_perk == 5: waves_to_perk = 0
+                waves_to_boss = 10 - (self.wave % 10)
+                if waves_to_boss == 10: waves_to_boss = 0
+                hints = []
+                if waves_to_perk > 0:
+                    hints.append((f"Perk in {waves_to_perk} wave{'s' if waves_to_perk!=1 else ''}", PURPLE))
+                if waves_to_boss > 0:
+                    hints.append((f"BOSS in {waves_to_boss} wave{'s' if waves_to_boss!=1 else ''}", (200,60,60)))
+                for hi, (htxt, hcol) in enumerate(hints):
+                    hs = self.fonts["tiny"].render(htxt, True, hcol)
+                    self.screen.blit(hs, (SW // 2 - hs.get_width() // 2, 32 + hi * 16))
+        else:
+            secs = max(0, math.ceil(self.break_timer / FPS))
+            wave_txt = self.fonts["med"].render(
+                f"Wave {self.wave} complete!  Next wave in {secs}s", True, GREEN)
+            self.screen.blit(wave_txt, (SW // 2 - wave_txt.get_width() // 2, 8))
+            if self.perk_screen.active:
+                ph = self.fonts["small"].render("PERK AVAILABLE - choose a card!", True, YELLOW)
+                self.screen.blit(ph, (SW // 2 - ph.get_width() // 2, 34))
+
+        # Boss HP bar — cinematic bar at bottom of screen
+        if self.boss and self.boss.alive:
+            bw = 600; bh = 22
+            bx = SW // 2 - bw // 2; by = SH - 62
+            pygame.draw.rect(self.screen, (20, 10, 10),
+                             (bx - 10, by - 16, bw + 20, bh + 30), border_radius=6)
+            pygame.draw.rect(self.screen, (80, 20, 20),
+                             (bx - 10, by - 16, bw + 20, bh + 30), 1, border_radius=6)
+            bar_col = (220, 40, 40) if self.boss.enraged else (180, 60, 200)
+            draw_bar(self.screen, bx, by, bw, bh, self.boss.hp, self.boss.max_hp, bar_col, bg=(40,10,10))
+            enrage_tag = "  [ENRAGED]" if self.boss.enraged else ""
+            blabel = self.fonts["small"].render(
+                f"{self.boss.name}{enrage_tag}  {self.boss.hp} / {self.boss.max_hp}", True, WHITE)
+            self.screen.blit(blabel, (SW // 2 - blabel.get_width() // 2, by - 14))
+
+        if self.boss_clone and self.boss_clone.alive:
+            cw = 400; ch = 14
+            cx = SW // 2 - cw // 2; cy = SH - 90
+            t_now = pygame.time.get_ticks()
+            pulse = math.sin(t_now * 0.004) * 0.5 + 0.5
+            clone_bar_col = lerp_color((180, 0, 255), (255, 80, 200), pulse)
+            pygame.draw.rect(self.screen, (15, 5, 25), (cx - 6, cy - 12, cw + 12, ch + 22), border_radius=5)
+            pygame.draw.rect(self.screen, clone_bar_col, (cx - 6, cy - 12, cw + 12, ch + 22), 1, border_radius=5)
+            draw_bar(self.screen, cx, cy, cw, ch, self.boss_clone.hp, self.boss_clone.max_hp,
+                     clone_bar_col, bg=(30, 5, 40))
+            clabel = self.fonts["tiny"].render(
+                f"Vexara (Clone)  {self.boss_clone.hp} / {self.boss_clone.max_hp}", True, (220, 160, 255))
+            self.screen.blit(clabel, (SW // 2 - clabel.get_width() // 2, cy - 10))
+
+        # Controls hint
+        hint = self.fonts["tiny"].render("[TAB] Shop  |  WASD Move  |  LMB Shoot  |  [SPACE] Dash  |  [P] Pause", True, GRAY)
+        self.screen.blit(hint, (SW // 2 - hint.get_width() // 2, SH - 22))
+
+    def draw_game_over(self):
+        overlay = pygame.Surface((SW, SH), pygame.SRCALPHA)
+        overlay.fill((0, 0, 0, 210))
+        self.screen.blit(overlay, (0, 0))
+
+        # Title
+        go = self.fonts["huge"].render("YOU DIED", True, RED)
+        self.screen.blit(go, (SW // 2 - go.get_width() // 2, 28))
+
+        # Rank banner (if made leaderboard)
+        if self.lb_rank is not None:
+            rank_col = YELLOW if self.lb_rank == 1 else (CYAN if self.lb_rank <= 3 else GREEN)
+            rank_msg = f"NEW #{self.lb_rank} ON LEADERBOARD!"
+            rm = self.fonts["large"].render(rank_msg, True, rank_col)
+            self.screen.blit(rm, (SW // 2 - rm.get_width() // 2, 84))
+
+        # ── Left panel: this run's stats ──────────────────────────────────────
+        panel_x = 60; panel_y = 130; panel_w = 460; panel_h = 472
+        pygame.draw.rect(self.screen, PANEL, (panel_x, panel_y, panel_w, panel_h), border_radius=12)
+        pygame.draw.rect(self.screen, CYAN, (panel_x, panel_y, panel_w, panel_h), 1, border_radius=12)
+
+        run_title = self.fonts["large"].render(f"{self.player.username}'s Run", True, CYAN)
+        self.screen.blit(run_title, (panel_x + panel_w // 2 - run_title.get_width() // 2, panel_y + 14))
+        pygame.draw.line(self.screen, (60, 60, 90),
+                         (panel_x + 16, panel_y + 48), (panel_x + panel_w - 16, panel_y + 48), 1)
+
+        stats = [
+            ("Wave reached",        str(self.wave),              YELLOW),
+            ("Level reached",       str(self.player.level),      CYAN),
+            ("Enemies killed",      str(self.player.kill_count), WHITE),
+            ("Bosses slain",        str(self.boss_killed),       (255, 100, 100)),
+            ("Corruption waves",    str(self.player.corruption_waves_cleared), (220, 80, 255)),
+            ("Gold collected",      str(self.player.gold),       YELLOW),
+            ("Perks picked",        str(sum(int(v / next(p["bonus"] for p in ALL_PERKS
+                                   if p["key"] == k) + 0.5) for k, v in self.player.perks.items())),
+             PURPLE),
+        ]
+        for i, (label, value, col) in enumerate(stats):
+            row_y = panel_y + 62 + i * 52
+            lbl = self.fonts["med"].render(label, True, GRAY)
+            val = self.fonts["large"].render(value, True, col)
+            self.screen.blit(lbl, (panel_x + 24, row_y))
+            self.screen.blit(val, (panel_x + panel_w - val.get_width() - 24, row_y))
+            if i < len(stats) - 1:
+                pygame.draw.line(self.screen, (45, 45, 62),
+                                 (panel_x + 16, row_y + 38), (panel_x + panel_w - 16, row_y + 38), 1)
+
+        # ── Right panel: leaderboard ──────────────────────────────────────────
+        lb_x = 560; lb_y = 130; lb_w = 660; lb_h = 420
+        pygame.draw.rect(self.screen, PANEL, (lb_x, lb_y, lb_w, lb_h), border_radius=12)
+        pygame.draw.rect(self.screen, YELLOW, (lb_x, lb_y, lb_w, lb_h), 1, border_radius=12)
+
+        self.leaderboard.draw(self.screen, self.fonts, lb_x + 12, lb_y + 14,
+                              lb_w - 24, highlight_name=self.player.username)
+
+        # Restart hint at bottom centre
+        restart = self.fonts["large"].render("Press R to return to menu", True, YELLOW)
+        self.screen.blit(restart, (SW // 2 - restart.get_width() // 2, SH - 48))
+
+    # ── main loop ─────────────────────────────────────────────────────────────
+
+    def run(self):
+        while True:
+            self.clock.tick(FPS)
+            mx, my = pygame.mouse.get_pos()
+            keys   = pygame.key.get_pressed()
+
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    pygame.quit(); sys.exit()
+                # Always let perk screen consume events when active
+                if self.perk_screen.active:
+                    self.perk_screen.handle_event(event)
+                    continue
+                # Settings button click on pause overlay
+                if self.paused and not self.pause_settings and not self.pause_dev and not self.pause_dev_prompt:
+                    if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                        # Settings button
+                        sbx = SW // 2 - 258; sby = SH // 2 + 62
+                        if sbx <= event.pos[0] <= sbx + 160 and sby <= event.pos[1] <= sby + 40:
+                            self.pause_settings = True
+                            continue
+                        # Dev Tools button — show password prompt
+                        dbx = SW // 2 - 80; dby = SH // 2 + 62
+                        if dbx <= event.pos[0] <= dbx + 160 and dby <= event.pos[1] <= dby + 40:
+                            self.pause_dev_prompt = True
+                            self.pause_dev_input  = ""
+                            continue
+                        # Exit to Menu button
+                        ex2 = SW // 2 + 98; ey2 = SH // 2 + 62
+                        if ex2 <= event.pos[0] <= ex2 + 160 and ey2 <= event.pos[1] <= ey2 + 40:
+                            MUSIC.play("menu")
+                            return "menu"
+
+                # Password prompt event handling
+                if self.paused and self.pause_dev_prompt:
+                    if event.type == pygame.KEYDOWN:
+                        if event.key == pygame.K_RETURN:
+                            if self.pause_dev_input == "1234":
+                                self.pause_dev        = True
+                                self.pause_dev_prompt = False
+                                self.pause_dev_input  = ""
+                            else:
+                                self.pause_dev_input = ""   # wrong — clear and try again
+                        elif event.key in (pygame.K_ESCAPE, pygame.K_p):
+                            self.pause_dev_prompt = False
+                            self.pause_dev_input  = ""
+                        elif event.key == pygame.K_BACKSPACE:
+                            self.pause_dev_input = self.pause_dev_input[:-1]
+                        elif len(self.pause_dev_input) < 8 and event.unicode.isprintable():
+                            self.pause_dev_input += event.unicode
+                    continue
+
+                if self.paused and self.pause_dev:
+                    if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                        px2, py2 = event.pos
+                        DPX = SW // 2 - 170; DPY = SH // 2 - 80
+                        DPW = 340
+                        DPH = 498 if self.dev_boss_expand else 312
+                        gold_rect  = pygame.Rect(DPX + 20, DPY + 70,  DPW - 40, 44)
+                        lvl_rect   = pygame.Rect(DPX + 20, DPY + 126, DPW - 40, 44)
+                        skip_rect  = pygame.Rect(DPX + 20, DPY + 182, DPW - 40, 44)
+                        boss_rect  = pygame.Rect(DPX + 20, DPY + 238, DPW - 40, 44)
+                        if gold_rect.collidepoint(px2, py2):
+                            self.player.gold += 100
+                            continue
+                        if lvl_rect.collidepoint(px2, py2):
+                            self.player.level += 1
+                            self.player.max_hp = int(
+                                (100 + self.player.level * 15) *
+                                (1 + self.player.perk("max_hp_pct")))
+                            self.player.hp = min(self.player.hp, self.player.max_hp)
+                            self.player.xp_to_next = self.player.xp_for_level(self.player.level)
+                            self.player.xp = 0
+                            continue
+                        if skip_rect.collidepoint(px2, py2):
+                            self._skip_wave()
+                            self.pause_dev = False
+                            self.paused    = False
+                            continue
+                        if boss_rect.collidepoint(px2, py2):
+                            self.dev_boss_expand = not self.dev_boss_expand
+                            continue
+                        # Boss pick buttons (only when expanded)
+                        if self.dev_boss_expand:
+                            for bi, bt in enumerate(BOSS_TYPES):
+                                boss_btn = pygame.Rect(DPX + 20, DPY + 294 + bi * 34, DPW - 40, 28)
+                                if boss_btn.collidepoint(px2, py2):
+                                    self._skip_to_boss(bi)
+                                    self.dev_boss_expand = False
+                                    self.pause_dev = False
+                                    self.paused    = False
+                                    continue
+                        if not (DPX <= px2 <= DPX + DPW and DPY <= py2 <= DPY + DPH):
+                            self.pause_dev = False
+                            self.dev_boss_expand = False
+                    if event.type == pygame.KEYDOWN and event.key in (pygame.K_ESCAPE, pygame.K_p):
+                        self.pause_dev = False
+                        self.dev_boss_expand = False
+                    continue
+                # Settings slider drag while paused
+                if self.paused and self.pause_settings:
+                    if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                        px2, py2 = event.pos
+                        PSX = SW // 2 - 210; PSY = SH // 2 - 130
+                        PSW = 420; PSH = 290
+                        SLX = PSX + 80; SLW = PSW - 160
+                        SLY  = PSY + 100
+                        SLY2 = PSY + 182
+                        PQY  = PSY + 242
+                        pbw2 = (PSW - 60) // 2
+                        if SLX - 10 <= px2 <= SLX + SLW + 10 and SLY - 14 <= py2 <= SLY + 14:
+                            self.pause_slider_drag = "music"
+                            MUSIC.set_volume(max(0.0, min(1.0, (px2 - SLX) / SLW)))
+                        elif SLX - 10 <= px2 <= SLX + SLW + 10 and SLY2 - 14 <= py2 <= SLY2 + 14:
+                            self.pause_slider_drag = "sfx"
+                            SOUNDS.set_volume(max(0.0, min(1.0, (px2 - SLX) / SLW)))
+                        elif (PSX + PSW // 2 - pbw2 <= px2 <= PSX + PSW // 2 and
+                              PQY <= py2 <= PQY + 36):
+                            GAME_SETTINGS.quality = "low"
+                            GAME_SETTINGS.save()
+                        elif (PSX + PSW // 2 + 10 <= px2 <= PSX + PSW // 2 + 10 + pbw2 and
+                              PQY <= py2 <= PQY + 36):
+                            GAME_SETTINGS.quality = "high"
+                            GAME_SETTINGS.save()
+                        elif not (PSX <= px2 <= PSX + PSW and PSY <= py2 <= PSY + PSH):
+                            self.pause_settings = False
+                    if event.type == pygame.MOUSEBUTTONUP and event.button == 1:
+                        self.pause_slider_drag = False
+                        GAME_SETTINGS.save()   # persist volume on release
+                    if event.type == pygame.MOUSEMOTION and self.pause_slider_drag:
+                        PSX = SW // 2 - 210; PSW = 420; SLX = PSX + 80; SLW = PSW - 160
+                        vol = max(0.0, min(1.0, (event.pos[0] - SLX) / SLW))
+                        if self.pause_slider_drag == "music":
+                            MUSIC.set_volume(vol)
+                        else:
+                            SOUNDS.set_volume(vol)
+                    if event.type == pygame.KEYDOWN and event.key in (pygame.K_ESCAPE, pygame.K_p):
+                        self.pause_settings = False
+                    continue   # don't fall through to normal event handling
+                if event.type == pygame.KEYDOWN:
+                    if event.key == pygame.K_ESCAPE:
+                        # ESC pauses/unpauses rather than quitting
+                        if not self.game_over and not self.perk_screen.active:
+                            self.paused = not self.paused
+                            if not self.paused:
+                                self.pause_settings = False
+                            continue
+                    if self.game_over:
+                        if event.key == pygame.K_r:
+                            MUSIC.play("menu")
+                            return "menu"   # signal caller to go back to username screen
+                        continue
+                    if event.key == pygame.K_p and not self.perk_screen.active:
+                        self.paused = not self.paused
+                        if not self.paused:
+                            self.pause_settings = False
+                    if self.paused:
+                        continue
+                    if event.key == pygame.K_SPACE and not self.shop.open and not self.perk_screen.active:
+                        # Dash in movement direction (or toward mouse if standing still)
+                        keys_now = pygame.key.get_pressed()
+                        ddx = ddy = 0
+                        if keys_now[pygame.K_w] or keys_now[pygame.K_UP]:    ddy -= 1
+                        if keys_now[pygame.K_s] or keys_now[pygame.K_DOWN]:  ddy += 1
+                        if keys_now[pygame.K_a] or keys_now[pygame.K_LEFT]:  ddx -= 1
+                        if keys_now[pygame.K_d] or keys_now[pygame.K_RIGHT]: ddx += 1
+                        if ddx == 0 and ddy == 0:   # no movement key — dash toward mouse
+                            cam_now = self.get_camera()
+                            mx_w = pygame.mouse.get_pos()[0] + cam_now[0]
+                            my_w = pygame.mouse.get_pos()[1] + cam_now[1]
+                            ddx = mx_w - self.player.x
+                            ddy = my_w - self.player.y
+                        self.player.try_dash(ddx, ddy)
+                        for _ in range(5):
+                            self.particles.append(Particle(self.player.x, self.player.y, (80, 220, 255)))
+                    if event.key == pygame.K_TAB:
+                        self.shop.toggle()
+                        if self.shop.open:
+                            MUSIC.play("shop")
+                        else:
+                            MUSIC.play("battle")
+                    if self.shop.open:
+                        self.shop.handle_key(event.key, self.player, self.floating_texts)
+                if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1 and self.shop.open:
+                    self.shop.handle_click(event.pos, self.player, self.floating_texts)
+
+            cam = self.get_camera()
+
+            # ── Death animation ────────────────────────────────────────────────
+            if self.death_anim_timer > 0:
+                self.death_anim_timer -= 1
+                self.draw_world(cam)
+                # Draw world contents frozen (no updates)
+                for gc in self.gold_coins: gc.draw(self.screen, cam)
+                for orb in self.fire_orbs: orb.draw(self.screen, cam)
+                for e in self.enemies: e.draw(self.screen, cam)
+                for proj in self.projectiles: proj.draw(self.screen, cam)
+                if self.boss and self.boss.alive:
+                    self.boss.draw(self.screen, cam)
+                    for m in self.boss.minions: m.draw(self.screen, cam)
+                if self.boss_clone and self.boss_clone.alive:
+                    self.boss_clone.draw(self.screen, cam)
+                # Don't draw the player body — they're exploding
+                # Update + draw death particles
+                next_dp = []
+                for dp in self.death_particles:
+                    dp[0] += dp[2]; dp[1] += dp[3]
+                    dp[2] *= 0.94; dp[3] *= 0.94   # slight drag
+                    dp[4] -= 1
+                    if dp[4] > 0:
+                        next_dp.append(dp)
+                        t    = dp[4] / dp[5]
+                        size = max(1, int(6 * t))
+                        alpha = max(0, min(255, int(255 * t)))
+                        sx = int(dp[0] - cam[0]); sy = int(dp[1] - cam[1])
+                        col = dp[6]
+                        # Draw as a short streak
+                        tail_x = sx - int(dp[2] * 3); tail_y = sy - int(dp[3] * 3)
+                        tail_c = lerp_color(col, BLACK, 0.6)
+                        pygame.draw.line(self.screen, tail_c, (tail_x, tail_y), (sx, sy),
+                                         max(1, size - 1))
+                        pygame.draw.circle(self.screen, col, (sx, sy), size)
+                self.death_particles = next_dp
+                # Dark vignette that grows as timer runs out
+                t_norm = 1 - self.death_anim_timer / 120
+                vign_alpha = int(180 * t_norm)
+                if vign_alpha > 0:
+                    vign = pygame.Surface((SW, SH), pygame.SRCALPHA)
+                    vign.fill((0, 0, 0, vign_alpha))
+                    self.screen.blit(vign, (0, 0))
+                self.draw_hud()
+                pygame.display.flip()
+                # When animation ends, trigger game over
+                if self.death_anim_timer == 0:
+                    self.game_over = True
+                    self.lb_rank = self.leaderboard.submit(
+                        self.player.username, self.wave, self.player.level,
+                        self.player.kill_count, self.boss_killed)
+                continue
+
+            if self.game_over:
+                self.draw_world(cam)
+                self.draw_game_over()
+                pygame.display.flip()
+                continue
+
+            if not self.shop.open and not self.perk_screen.active and not self.paused:
+                self.player._enemies_ref = self.enemies
+                self.player._boss_ref    = [b for b in [self.boss, self.boss_clone] if b and b.alive]
+                self.player.update(keys, mx, my, cam, self.projectiles,
+                                   (self.world_w, self.world_h))
+
+                # ── Wave logic ────────────────────────────────────────────────
+                alive_count = sum(1 for e in self.enemies if e.alive)
+                boss_alive  = self.boss is not None and self.boss.alive
+                clone_alive = self.boss_clone is not None and self.boss_clone.alive
+
+                if self.wave_active:
+                    # Boss wave: only one entity — the boss (and optional Vexara clone)
+                    if self.boss_wave:
+                        if not boss_alive and not clone_alive and not (self.boss_intro and self.boss_intro.active):
+                            # Boss (and clone if present) are both dead
+                            self._on_boss_killed()
+                    else:
+                        self.spawn_timer += 1
+                        if (self.spawn_timer >= self.spawn_interval
+                                and self.wave_enemy_count < self.wave_enemy_target):
+                            self.spawn_timer = 0
+                            self.spawn_enemy()
+                            self.wave_enemy_count += 1
+                        if self.wave_enemy_count >= self.wave_enemy_target and alive_count == 0:
+                            self.wave_active = False
+                            self.break_timer = WAVE_BREAK_SECS * FPS
+                            # Clear lingering enemy projectiles so the player can't be hit after the wave
+                            self.projectiles = [p for p in self.projectiles if p.owner == "player"]
+                            self.fire_orbs   = []
+                            if self.elite_wave:
+                                self.player.corruption_waves_cleared += 1
+                                MUSIC.play("battle")
+                                self.floating_texts.append(
+                                    FloatingText(self.player.x, self.player.y - 80,
+                                                 f"Corruption Wave cleared!  ({self.player.corruption_waves_cleared} total)",
+                                                 (220, 80, 255), 22))
+                            else:
+                                self.floating_texts.append(
+                                    FloatingText(self.player.x, self.player.y - 80,
+                                                 f"Wave {self.wave} cleared!", GREEN, 24))
+                            self.elite_wave = False
+                            if self.wave % 5 == 0 and self.wave % 10 != 0:
+                                self.perk_screen.offer()
+                else:
+                    self.break_timer -= 1
+                    if self.break_timer <= 0:
+                        self.wave             += 1
+                        self.wave_active       = True
+                        self.wave_enemy_count  = 0
+                        self.boss_wave         = (self.wave % 10 == 0)
+                        if self.boss_wave:
+                            self._spawn_boss()
+                        else:
+                            # Roll elite wave chance based on player level
+                            chance = elite_wave_chance(self.player.level)
+                            self.elite_wave = (random.random() < chance)
+                            self.wave_enemy_target = self._wave_size(self.wave)
+                            self.spawn_timer       = 0
+                            self.spawn_interval    = max(40, 90 - self.wave * 3)
+                            MUSIC.play("battle")
+                            if self.elite_wave:
+                                self.corruption_flash_timer = 90   # 1.5s flash effect
+                                MUSIC.play("corruption_wave")
+                                self.floating_texts.append(
+                                    FloatingText(self.player.x, self.player.y - 120,
+                                                 "CORRUPTION WAVE!", (180, 0, 220), 34))
+                                self.floating_texts.append(
+                                    FloatingText(self.player.x, self.player.y - 78,
+                                                 f"Wave {self.wave} — Corrupted enemies incoming!", (200, 80, 255), 20))
+                            else:
+                                self.elite_wave = False
+                                self.floating_texts.append(
+                                    FloatingText(self.player.x, self.player.y - 80,
+                                                 f"Wave {self.wave} incoming!", RED, 24))
+
+                # ── Enemy update ───────────────────────────────────────────────
+                new_splinters = []
+                for e in self.enemies:
+                    drop_orb_before = e.drop_orb
+                    e.update(self.player, self.projectiles, (self.world_w, self.world_h))
+                    # Dragon dropped a fire orb this tick
+                    if e.drop_orb and not drop_orb_before:
+                        orb_count = 3 if (e.elite and e.behaviour == "dragon") else 1
+                        for _ in range(orb_count):
+                            ox = random.uniform(-20, 20) if orb_count > 1 else 0
+                            oy = random.uniform(-20, 20) if orb_count > 1 else 0
+                            self.fire_orbs.append(FireOrb(e.x + ox, e.y + oy, max(1, e.dmg // 3)))
+                        e.drop_orb = False
+
+                # ── Boss update ────────────────────────────────────────────────
+                was_enraged = self.boss.enraged if self.boss else False
+                if self.boss and self.boss.alive and not (self.boss_intro and self.boss_intro.active):
+                    self.boss.update(self.player, self.projectiles, (self.world_w, self.world_h))
+                    # Enrage announcement
+                    if not was_enraged and self.boss.enraged:
+                        self.floating_texts.append(
+                            FloatingText(self.boss.x, self.boss.y - 80,
+                                         f"{self.boss.name} ENRAGES!", (255, 80, 80), 24))
+                    # Vexara split trigger
+                    if getattr(self.boss, '_trigger_vex_split', False):
+                        self.boss._trigger_vex_split = False
+                        # Spawn clone offset to the side
+                        offset_ang = random.uniform(0, math.pi * 2)
+                        cx = self.boss.x + math.cos(offset_ang) * 160
+                        cy = self.boss.y + math.sin(offset_ang) * 160
+                        cx = max(80, min(self.world_w - 80, cx))
+                        cy = max(80, min(self.world_h - 80, cy))
+                        # Find Vexara's btype_idx
+                        vex_idx = next(i for i, b in enumerate(BOSS_TYPES)
+                                       if b["name"] == "Vexara the Hex-Weaver")
+                        clone = Boss(cx, cy, vex_idx, self.player.level)
+                        clone.is_vex_clone   = True
+                        clone.vex_split_done = True
+                        clone.enraged        = True    # clone always in enraged mode
+                        clone.hp             = self.boss.hp   # same HP as primary
+                        clone.max_hp         = self.boss.max_hp
+                        clone.spiral_ang     = self.boss.spiral_ang + math.pi  # offset angle
+                        clone.vex_pulse_t    = 30   # offset pulse phase
+                        self.boss_clone      = clone
+                        self.boss.vex_clone  = clone
+                        self.floating_texts.append(
+                            FloatingText(self.boss.x, self.boss.y - 80,
+                                         "Vexara SPLITS!", (255, 80, 220), 26))
+
+                # ── Vexara clone update ────────────────────────────────────────
+                if self.boss_clone and self.boss_clone.alive:
+                    self.boss_clone.update(self.player, self.projectiles,
+                                           (self.world_w, self.world_h))
+                elif self.boss_clone and not self.boss_clone.alive:
+                    # Clone died — explosion particles
+                    for _ in range(30):
+                        self.particles.append(Particle(self.boss_clone.x, self.boss_clone.y,
+                                                        (200, 0, 255)))
+                        self.particles.append(Particle(self.boss_clone.x, self.boss_clone.y,
+                                                        (255, 80, 200)))
+                    self.floating_texts.append(
+                        FloatingText(self.boss_clone.x, self.boss_clone.y - 60,
+                                     "Clone destroyed!", (255, 80, 220), 20))
+                    self.boss_clone = None
+
+                # ── Projectiles ────────────────────────────────────────────────
+                for proj in self.projectiles[:]:
+                    proj.update()
+                    if not proj.alive:
+                        self.projectiles.remove(proj); continue
+
+                    if proj.owner == "player":
+                        # Boss is invulnerable during spawn cinematic
+                        if self.boss and self.boss.alive:
+                            if self.boss_intro and self.boss_intro.active:
+                                pass  # cannot hit boss during intro — skip
+                            elif math.hypot(proj.x - self.boss.x, proj.y - self.boss.y) < proj.size + self.boss.size:
+                                was_enraged_b = self.boss.enraged
+                                self.boss.take_damage(proj.dmg)
+                                self.floating_texts.append(FloatingText(self.boss.x, self.boss.y - 30, f"-{proj.dmg}", (255, 100, 100)))
+                                for _ in range(5):
+                                    self.particles.append(Particle(proj.x, proj.y, self.boss.proj_col))
+                                proj.alive = False
+                                if not was_enraged_b and self.boss.enraged:
+                                    self.floating_texts.append(
+                                        FloatingText(self.boss.x, self.boss.y - 80,
+                                                     f"{self.boss.name} ENRAGES!", (255, 80, 80), 24))
+                                continue
+                            # Hit Vexara clone
+                            if self.boss_clone and self.boss_clone.alive:
+                                if math.hypot(proj.x - self.boss_clone.x, proj.y - self.boss_clone.y) < proj.size + self.boss_clone.size:
+                                    self.boss_clone.take_damage(proj.dmg)
+                                    self.floating_texts.append(
+                                        FloatingText(self.boss_clone.x, self.boss_clone.y - 30,
+                                                     f"-{proj.dmg}", (255, 100, 100)))
+                                    for _ in range(5):
+                                        self.particles.append(Particle(proj.x, proj.y, self.boss_clone.proj_col))
+                                    proj.alive = False
+                                    continue
+                            # Hit Gorvak minions
+                            for m in self.boss.minions:
+                                if m.alive and math.hypot(proj.x - m.x, proj.y - m.y) < proj.size + m.SIZE:
+                                    m.take_damage(proj.dmg)
+                                    self.floating_texts.append(FloatingText(m.x, m.y - 18, f"-{proj.dmg}", (120, 220, 120)))
+                                    for _ in range(5):
+                                        self.particles.append(Particle(proj.x, proj.y, (120, 220, 120)))
+                                    proj.alive = False
+                                    if not m.alive:
+                                        for _ in range(8):
+                                            self.particles.append(Particle(m.x, m.y, (120, 220, 120)))
+                                    break
+                        is_pierce = isinstance(proj, PierceProjectile)
+                        for e in self.enemies:
+                            if not e.alive: continue
+                            if is_pierce and hasattr(proj, 'hit_ids') and e.etype in proj.hit_ids: continue
+                            if math.hypot(proj.x - e.x, proj.y - e.y) < proj.size + e.size:
+                                e.take_damage(proj.dmg)
+                                self.floating_texts.append(FloatingText(e.x, e.y - 20, f"-{proj.dmg}", RED))
+                                for _ in range(6):
+                                    self.particles.append(Particle(proj.x, proj.y, proj.col))
+                                if is_pierce:
+                                    proj.hit_ids.add(e.etype)   # mark as hit, don't remove proj
+                                else:
+                                    proj.alive = False
+                                if not e.alive:
+                                    self.player.kill_count += 1
+                                    SOUNDS.play("enemy_death", volume_scale=0.8)
+                                    n_coins  = random.randint(1, 3)
+                                    per_coin = max(1, e.gold_drop // n_coins)
+                                    for _ in range(n_coins):
+                                        self.gold_coins.append(GoldCoin(e.x, e.y, per_coin))
+                                    if self.player.gain_xp(e.xp_drop):
+                                        SOUNDS.play("level_up")
+                                        self.floating_texts.append(
+                                            FloatingText(self.player.x, self.player.y - 60,
+                                                         f"LEVEL UP!  {self.player.level}", CYAN, 22))
+                                    for _ in range(12):
+                                        self.particles.append(Particle(e.x, e.y, e.color))
+                                    # ── On-death specials ──────────────────────
+                                    if e.behaviour == "bounce" and not e.is_splinter:
+                                        for _ in range(2):
+                                            ox = random.uniform(-30, 30)
+                                            oy = random.uniform(-30, 30)
+                                            new_splinters.append(
+                                                Enemy(e.x + ox, e.y + oy,
+                                                      0, self.player.level,
+                                                      is_splinter=True))
+                                if not is_pierce:
+                                    break
+
+                    elif proj.owner == "enemy":
+                        if math.hypot(proj.x - self.player.x, proj.y - self.player.y) < proj.size + self.player.size:
+                            if self.player.take_damage(proj.dmg):
+                                SOUNDS.play("player_hit", volume_scale=0.9)
+                                self.floating_texts.append(FloatingText(self.player.x, self.player.y - 30, f"-{proj.dmg}", RED))
+                                for _ in range(8):
+                                    self.particles.append(Particle(self.player.x, self.player.y, PURPLE))
+                            proj.alive = False
+
+                self.enemies = [e for e in self.enemies if e.alive] + new_splinters
+
+                # ── Fire orbs ──────────────────────────────────────────────────
+                self.fire_orbs = [orb for orb in self.fire_orbs if orb.update(self.player)]
+
+                # ── Nyxoth fire bombs ──────────────────────────────────────────
+                # Drain pending bombs queued by boss update
+                if self.boss and self.boss.pattern == "homing":
+                    pending = getattr(self.boss, 'fire_orbs_pending', [])
+                    if pending:
+                        self.nyx_bombs.extend(pending)
+                        self.boss.fire_orbs_pending = []
+                self.nyx_bombs = [b for b in self.nyx_bombs if b.update(self.player)]
+
+                # ── Gold coins ─────────────────────────────────────────────────
+                for gc in self.gold_coins[:]:
+                    gc.update(self.player)
+                    if not gc.alive:
+                        self.floating_texts.append(
+                            FloatingText(self.player.x, self.player.y - 40, f"+{gc.amount}g", YELLOW))
+                        self.gold_coins.remove(gc)
+
+                # ── Boss intro tick ───────────────────────────────────────────
+                if self.boss_intro and self.boss_intro.active:
+                    self.boss_intro.update()
+                    if not self.boss_intro.active:
+                        self.boss_intro = None   # cinematic done, boss goes live
+                for p in self.particles[:]:
+                    p.update()
+                    if p.life <= 0: self.particles.remove(p)
+                for ft in self.floating_texts[:]:
+                    ft.update()
+                    if ft.life <= 0: self.floating_texts.remove(ft)
+
+                if self.player.hp <= 0 and self.death_anim_timer == 0 and not self.game_over:
+                    self.death_anim_timer = 120   # 2 seconds at 60fps
+                    SOUNDS.play("player_hit", volume_scale=1.0)
+                    # Spawn outward explosion particles — bolts in all directions
+                    px_c = self.player.x; py_c = self.player.y
+                    cols = [CYAN, WHITE, (80, 200, 255), (200, 80, 255), YELLOW]
+                    for i in range(40):
+                        ang  = math.pi * 2 / 40 * i + random.uniform(-0.1, 0.1)
+                        spd  = random.uniform(2.5, 7.0)
+                        life = random.randint(50, 115)
+                        self.death_particles.append([
+                            px_c, py_c,
+                            math.cos(ang) * spd,
+                            math.sin(ang) * spd,
+                            life, life,
+                            random.choice(cols),
+                        ])
+
+            # ── Draw ──────────────────────────────────────────────────────────
+            self.draw_world(cam)
+
+            # Nyxoth: star field overlay (screen-space, doesn't scroll)
+            if (self.boss_wave and self.boss and
+                    getattr(self.boss, 'pattern', None) == "homing"):
+                t_twink = pygame.time.get_ticks()
+                for i, (ssx, ssy, sr, sbright) in enumerate(self.nyx_stars):
+                    twinkle  = sbright * (0.6 + 0.4 * math.sin(t_twink * 0.003 + i * 1.7))
+                    star_col = lerp_color((100, 80, 160), (255, 255, 255), twinkle)
+                    pygame.draw.circle(self.screen, star_col, (ssx, ssy), sr)
+            for gc in self.gold_coins:
+                gc.draw(self.screen, cam)
+            for orb in self.fire_orbs:
+                orb.draw(self.screen, cam)
+            for bomb in self.nyx_bombs:
+                bomb.draw(self.screen, cam)
+            for e in self.enemies:
+                e.draw(self.screen, cam)
+            if self.boss and self.boss.alive and not (self.boss_intro and self.boss_intro.active):
+                self.boss.draw(self.screen, cam)
+                for m in self.boss.minions:
+                    m.draw(self.screen, cam)
+            if self.boss_clone and self.boss_clone.alive:
+                self.boss_clone.draw(self.screen, cam)
+            for proj in self.projectiles:
+                proj.draw(self.screen, cam)
+            for p in self.particles:
+                p.draw(self.screen, cam)
+            self.player.draw(self.screen, cam, self.fonts["small"], self.fonts["tiny"])
+            for ft in self.floating_texts:
+                ft.draw(self.screen, cam, self.fonts["small"])
+
+            if self.boss_intro and self.boss_intro.active:
+                # Cinematic draws darkness + boss materialisation + HUD on top
+                self.boss_intro.draw(self.screen, cam, self.draw_hud)
+            else:
+                # ── Malachar arena overlay (world-space, under HUD) ───────────
+                is_malachar_boss = (self.boss_wave and self.boss and
+                                    getattr(self.boss, 'pattern', None) == "charge")
+                if is_malachar_boss:
+                    t_now   = pygame.time.get_ticks()
+                    pulse_m = math.sin(t_now * 0.002) * 0.5 + 0.5
+                    tint_r  = max(0, min(255, int(50 + pulse_m * 40)))
+                    tint_g  = max(0, min(255, int(10 + pulse_m * 15)))
+                    self._overlay.fill((tint_r, tint_g, 0, 65))
+                    self.screen.blit(self._overlay, (0, 0))
+
+                    # Spawn rising embers
+                    self.mal_ember_cd -= 1
+                    if self.mal_ember_cd <= 0:
+                        self.mal_ember_cd = random.randint(6, 16)  # slightly less frequent
+                        ex = cam[0] + random.randint(0, SW)
+                        ey = cam[1] + random.randint(0, SH)
+                        self.mal_embers.append([
+                            float(ex), float(ey),
+                            random.uniform(-0.5, 0.5),
+                            random.uniform(-1.8, -0.6),
+                            random.randint(30, 70),
+                            random.randint(30, 70),
+                        ])
+
+                    # Update + draw embers — draw directly, no per-ember surface alloc
+                    surviving_em = []
+                    for em in self.mal_embers:
+                        em[0] += em[2]; em[1] += em[3]
+                        em[4] -= 1
+                        if em[4] > 0:
+                            surviving_em.append(em)
+                            et  = em[4] / em[5]
+                            ea  = max(0, min(255, int(200 * et)))
+                            if ea < 8:
+                                continue
+                            esx = int(em[0] - cam[0]); esy = int(em[1] - cam[1])
+                            if -4 < esx < SW + 4 and -4 < esy < SH + 4:
+                                er  = max(1, int(3 * et))
+                                ecr = max(0, min(255, int(255 - (1 - et) * 55)))
+                                ecg = max(0, min(255, int(80 + et * 140)))
+                                # Draw solid dot — alpha approximated by blending toward bg
+                                pygame.draw.circle(self.screen, (ecr, ecg, 0), (esx, esy), er)
+                    self.mal_embers = surviving_em
+
+                # ── Vexara boss arena overlay (world-space, under HUD) ─────────
+                is_vexara_boss = (self.boss_wave and self.boss and
+                                  getattr(self.boss, 'pattern', None) == "spiral")
+                if is_vexara_boss:
+                    t_now = pygame.time.get_ticks()
+                    pulse_t = math.sin(t_now * 0.0025) * 0.5 + 0.5
+                    tint_r  = max(0, min(255, int(lerp_color((50, 0, 80), (80, 0, 60), pulse_t)[0])))
+                    tint_b  = max(0, min(255, int(lerp_color((50, 0, 80), (80, 0, 60), pulse_t)[2])))
+                    self._overlay.fill((tint_r, 0, tint_b, 90))
+                    self.screen.blit(self._overlay, (0, 0))
+
+                    # ── Intense zap lines ─────────────────────────────────────
+                    self.vex_zap_cd -= 1
+                    if self.vex_zap_cd <= 0:
+                        self.vex_zap_cd = random.randint(6, 20)
+                        wx0 = cam[0] + random.randint(10, SW - 10)
+                        wy0 = cam[1] + random.randint(10, SH - 10)
+                        pts = [(wx0, wy0)]
+                        zx, zy = wx0, wy0
+                        segs   = random.randint(6, 14)
+                        length = random.randint(120, 380)
+                        base_a = random.uniform(0, math.pi * 2)
+                        seg_l  = length / segs
+                        for _ in range(segs):
+                            base_a += random.uniform(-1.1, 1.1)
+                            zx += math.cos(base_a) * seg_l
+                            zy += math.sin(base_a) * seg_l
+                            pts.append((zx, zy))
+                        life = random.randint(10, 22)
+                        self.vex_zaps.append([pts, life, life])
+
+                    # Draw all zaps onto a single shared overlay then blit once
+                    if self.vex_zaps:
+                        self._overlay.fill((0, 0, 0, 0))
+                        surviving_vz = []
+                        for zap in self.vex_zaps:
+                            zpts, zlife, zmax = zap
+                            zlife -= 1
+                            if zlife > 0:
+                                surviving_vz.append([zpts, zlife, zmax])
+                                fade  = zlife / zmax
+                                alpha = int(255 * fade)
+                                screen_pts = [(int(px - cam[0]), int(py - cam[1])) for px, py in zpts]
+                                if len(screen_pts) >= 2:
+                                    pygame.draw.lines(self._overlay, (180, 0, 255, max(0, int(alpha * 0.5))),
+                                                      False, screen_pts, 5)
+                                    core_col = lerp_color((255, 80, 255), (255, 255, 255), fade)
+                                    pygame.draw.lines(self._overlay, (*core_col, alpha),
+                                                      False, screen_pts, 2)
+                                    pygame.draw.lines(self._overlay, (255, 255, 255, max(0, int(alpha * 0.7))),
+                                                      False, screen_pts, 1)
+                        self.screen.blit(self._overlay, (0, 0))
+                        self.vex_zaps = surviving_vz
+                    else:
+                        self.vex_zaps = [z for z in self.vex_zaps if z[1] > 0]
+
+                    # ── Drifting hex runes ────────────────────────────────────
+                    self.vex_rune_cd -= 1
+                    if self.vex_rune_cd <= 0:
+                        self.vex_rune_cd = random.randint(40, 90)
+                        rwx = cam[0] + random.randint(40, SW - 40)
+                        rwy = cam[1] + random.randint(40, SH - 40)
+                        spin = random.uniform(-0.012, 0.012)
+                        life = random.randint(120, 220)
+                        self.vex_runes.append([float(rwx), float(rwy),
+                                               random.uniform(0, math.pi * 2),
+                                               spin, life, life])
+
+                    # Draw all runes onto shared overlay then blit once
+                    if self.vex_runes:
+                        self._overlay.fill((0, 0, 0, 0))
+                        surviving_r = []
+                        for rune in self.vex_runes:
+                            rwx, rwy, rang, spin, rlife, rmax = rune
+                            rlife -= 1
+                            rune[4] = rlife
+                            rune[2] += spin
+                            if rlife > 0:
+                                surviving_r.append(rune)
+                                fade  = min(1.0, rlife / rmax * 2) if rlife > rmax * 0.5 else (rlife / (rmax * 0.5))
+                                alpha = int(70 * fade)
+                                if alpha > 2:
+                                    rsx = int(rwx - cam[0]); rsy = int(rwy - cam[1])
+                                    if -80 < rsx < SW + 80 and -80 < rsy < SH + 80:
+                                        r_rad = int(30 + math.sin(rlife * 0.05) * 8)
+                                        hex_pts = [
+                                            (rsx + int(math.cos(rang + math.pi / 3 * i) * r_rad),
+                                             rsy + int(math.sin(rang + math.pi / 3 * i) * r_rad))
+                                            for i in range(6)
+                                        ]
+                                        inner_pts = [
+                                            (rsx + int(math.cos(rang + math.pi / 3 * i) * (r_rad // 2)),
+                                             rsy + int(math.sin(rang + math.pi / 3 * i) * (r_rad // 2)))
+                                            for i in range(6)
+                                        ]
+                                        rune_col = lerp_color((200, 0, 255), (255, 80, 200), pulse_t)
+                                        pygame.draw.polygon(self._overlay, (*rune_col, alpha), hex_pts, 1)
+                                        pygame.draw.polygon(self._overlay, (*rune_col, alpha // 2), inner_pts, 1)
+                                        for i in range(3):
+                                            pygame.draw.line(self._overlay, (*rune_col, alpha // 3),
+                                                             hex_pts[i], hex_pts[i + 3], 1)
+                        self.screen.blit(self._overlay, (0, 0))
+                        self.vex_runes = surviving_r
+                    else:
+                        self.vex_runes = [r for r in self.vex_runes if r[4] > 0]
+
+                # ── Corruption wave ambient overlay (world-space, under HUD) ──
+                if self.elite_wave:
+                    self._overlay.fill((40, 0, 60, 55))
+                    self.screen.blit(self._overlay, (0, 0))
+
+                    self.corruption_zap_cd -= 1
+                    if self.corruption_zap_cd <= 0:
+                        self.corruption_zap_cd = random.randint(18, 55)
+                        wx0 = cam[0] + random.randint(20, SW - 20)
+                        wy0 = cam[1] + random.randint(20, SH - 20)
+                        pts = [(wx0, wy0)]
+                        zx, zy = wx0, wy0
+                        segs   = random.randint(5, 11)
+                        length = random.randint(80, 260)
+                        base_a = random.uniform(0, math.pi * 2)
+                        seg_l  = length / segs
+                        for _ in range(segs):
+                            base_a += random.uniform(-0.9, 0.9)
+                            zx += math.cos(base_a) * seg_l
+                            zy += math.sin(base_a) * seg_l
+                            pts.append((zx, zy))
+                        life = random.randint(14, 28)
+                        self.corruption_zaps.append([pts, life, life])
+
+                    if self.corruption_zaps:
+                        self._overlay.fill((0, 0, 0, 0))
+                        surviving = []
+                        for zap in self.corruption_zaps:
+                            zpts, zlife, zmax = zap
+                            zlife -= 1
+                            if zlife > 0:
+                                surviving.append([zpts, zlife, zmax])
+                                fade  = zlife / zmax
+                                width = max(1, int(3 * fade))
+                                alpha = int(220 * fade)
+                                screen_pts = [(int(px - cam[0]), int(py - cam[1])) for px, py in zpts]
+                                if len(screen_pts) >= 2:
+                                    pygame.draw.lines(self._overlay, (200, 80, 255, alpha),
+                                                      False, screen_pts, width + 1)
+                                    pygame.draw.lines(self._overlay, (240, 180, 255, min(255, int(alpha * 0.6))),
+                                                      False, screen_pts, max(1, width - 1))
+                        self.screen.blit(self._overlay, (0, 0))
+                        self.corruption_zaps = surviving
+                    else:
+                        self.corruption_zaps = []
+
+                self.draw_hud()
+
+            self.shop.draw(self.screen, self.player, self.fonts)
+            self.perk_screen.draw(self.screen)
+            if self.paused:
+                overlay = pygame.Surface((SW, SH), pygame.SRCALPHA)
+                overlay.fill((0, 0, 0, 160))
+                self.screen.blit(overlay, (0, 0))
+
+                pt = self.fonts["huge"].render("PAUSED", True, WHITE)
+                self.screen.blit(pt, (SW // 2 - pt.get_width() // 2, SH // 2 - 80))
+
+                ps = self.fonts["med"].render("Press P or ESC to resume", True, GRAY)
+                self.screen.blit(ps, (SW // 2 - ps.get_width() // 2, SH // 2 - 20))
+
+                # Three buttons: Settings | Dev Tools | Exit to Menu
+                sb_rect   = pygame.Rect(SW // 2 - 258, SH // 2 + 62, 160, 40)
+                db_rect   = pygame.Rect(SW // 2 - 80,  SH // 2 + 62, 160, 40)
+                exit_rect = pygame.Rect(SW // 2 + 98,  SH // 2 + 62, 160, 40)
+
+                for rect, label, col in [
+                    (sb_rect,   "Settings",       (140, 180, 255)),
+                    (db_rect,   "Dev Tools",       (255, 160, 40)),
+                    (exit_rect, "Exit to Menu",    (220, 60, 60)),
+                ]:
+                    pygame.draw.rect(self.screen, lerp_color(PANEL, col, 0.2), rect, border_radius=8)
+                    pygame.draw.rect(self.screen, col, rect, 1, border_radius=8)
+                    btn_lbl = self.fonts["small"].render(label, True, col)
+                    self.screen.blit(btn_lbl, (rect.centerx - btn_lbl.get_width() // 2,
+                                               rect.centery - btn_lbl.get_height() // 2))
+
+                # Settings panel (if open)
+                if self.pause_settings:
+                    PSX = SW // 2 - 210; PSY = SH // 2 - 130
+                    PSW = 420;           PSH = 290
+                    SLX = PSX + 80;      SLW = PSW - 160
+                    SLY  = PSY + 100     # music slider
+                    SLY2 = PSY + 182     # sfx slider
+                    PQY  = PSY + 242     # quality toggle row
+
+                    pygame.draw.rect(self.screen, PANEL,
+                                     (PSX, PSY, PSW, PSH), border_radius=14)
+                    pygame.draw.rect(self.screen, (140, 180, 255),
+                                     (PSX, PSY, PSW, PSH), 2, border_radius=14)
+
+                    stitle = self.fonts["large"].render("Settings", True, (140, 180, 255))
+                    self.screen.blit(stitle,
+                                     (PSX + PSW // 2 - stitle.get_width() // 2, PSY + 14))
+                    pygame.draw.line(self.screen, (60, 60, 90),
+                                     (PSX + 20, PSY + 50), (PSX + PSW - 20, PSY + 50), 1)
+
+                    def _ps(label, vol, sy):
+                        lbl = self.fonts["med"].render(label, True, WHITE)
+                        self.screen.blit(lbl, (PSX + 20, sy - 34))
+                        pct = self.fonts["med"].render(f"{int(vol * 100)}%", True, CYAN)
+                        self.screen.blit(pct, (PSX + PSW - 20 - pct.get_width(), sy - 34))
+                        pygame.draw.rect(self.screen, (50, 50, 70),
+                                         (SLX, sy - 4, SLW, 8), border_radius=4)
+                        fw = int(vol * SLW)
+                        if fw > 0:
+                            pygame.draw.rect(self.screen, CYAN, (SLX, sy - 4, fw, 8), border_radius=4)
+                        kx = int(SLX + vol * SLW)
+                        pygame.draw.circle(self.screen, WHITE, (kx, sy), 12)
+                        pygame.draw.circle(self.screen, CYAN,  (kx, sy), 10)
+                        pygame.draw.circle(self.screen, WHITE, (kx, sy), 10, 2)
+                        for t in (0.0, 0.25, 0.5, 0.75, 1.0):
+                            tx2 = int(SLX + t * SLW)
+                            pygame.draw.line(self.screen, (80, 80, 100),
+                                             (tx2, sy + 14), (tx2, sy + 20), 1)
+
+                    _ps("Music Volume",  MUSIC.volume,  SLY)
+                    pygame.draw.line(self.screen, (45, 45, 65),
+                                     (PSX + 20, SLY + 28), (PSX + PSW - 20, SLY + 28), 1)
+                    _ps("Sound Effects", SOUNDS.volume, SLY2)
+                    pygame.draw.line(self.screen, (45, 45, 65),
+                                     (PSX + 20, SLY2 + 28), (PSX + PSW - 20, SLY2 + 28), 1)
+
+                    # Quality toggle
+                    qlbl = self.fonts["med"].render("Quality", True, WHITE)
+                    self.screen.blit(qlbl, (PSX + 20, PQY + 8))
+                    pbw2 = (PSW - 60) // 2
+                    for qi, (qlabel, qval) in enumerate([("Low", "low"), ("High", "high")]):
+                        qx   = PSX + PSW // 2 - pbw2 + qi * (pbw2 + 10)
+                        aq   = GAME_SETTINGS.quality == qval
+                        qcol = (100, 220, 100) if qval == "high" else (220, 160, 60)
+                        qbg  = lerp_color(PANEL, qcol, 0.3 if aq else 0.05)
+                        pygame.draw.rect(self.screen, qbg,
+                                         (qx, PQY, pbw2, 36), border_radius=8)
+                        pygame.draw.rect(self.screen, qcol if aq else GRAY,
+                                         (qx, PQY, pbw2, 36), 2 if aq else 1, border_radius=8)
+                        qt = self.fonts["med"].render(qlabel, True, qcol if aq else GRAY)
+                        self.screen.blit(qt, (qx + pbw2 // 2 - qt.get_width() // 2,
+                                              PQY + 18 - qt.get_height() // 2))
+
+                    close_h = self.fonts["tiny"].render(
+                        "Click outside or press P / ESC to close", True, GRAY)
+                    self.screen.blit(close_h,
+                                     (PSX + PSW // 2 - close_h.get_width() // 2,
+                                      PSY + PSH - 22))
+
+                # Password prompt
+                if self.pause_dev_prompt:
+                    PPW, PPH = 340, 160
+                    PPX = SW // 2 - PPW // 2; PPY = SH // 2 - PPH // 2
+                    pygame.draw.rect(self.screen, PANEL,           (PPX, PPY, PPW, PPH), border_radius=14)
+                    pygame.draw.rect(self.screen, (255, 160, 40),  (PPX, PPY, PPW, PPH), 2, border_radius=14)
+                    pt = self.fonts["large"].render("Dev Tools", True, (255, 160, 40))
+                    self.screen.blit(pt, (PPX + PPW // 2 - pt.get_width() // 2, PPY + 14))
+                    ps = self.fonts["small"].render("Enter password:", True, GRAY)
+                    self.screen.blit(ps, (PPX + PPW // 2 - ps.get_width() // 2, PPY + 52))
+                    # Password input box (mask input as dots)
+                    pw_display = "●" * len(self.pause_dev_input)
+                    bx2 = PPX + 30; by2 = PPY + 76
+                    pygame.draw.rect(self.screen, (35, 35, 52), (bx2, by2, PPW - 60, 38), border_radius=8)
+                    pygame.draw.rect(self.screen, (255, 160, 40), (bx2, by2, PPW - 60, 38), 1, border_radius=8)
+                    pw_surf = self.fonts["large"].render(pw_display, True, WHITE)
+                    self.screen.blit(pw_surf, (bx2 + 12, by2 + 8))
+                    hint_p = self.fonts["tiny"].render("ENTER to confirm  |  ESC to cancel", True, GRAY)
+                    self.screen.blit(hint_p, (PPX + PPW // 2 - hint_p.get_width() // 2, PPY + PPH - 24))
+
+                if self.pause_dev:
+                    DPX = SW // 2 - 170; DPY = SH // 2 - 80
+                    DPW = 340
+                    DPH = 498 if self.dev_boss_expand else 312
+                    DEV_COL = (255, 160, 40)
+
+                    pygame.draw.rect(self.screen, PANEL,    (DPX, DPY, DPW, DPH), border_radius=14)
+                    pygame.draw.rect(self.screen, DEV_COL,  (DPX, DPY, DPW, DPH), 2, border_radius=14)
+
+                    dtitle = self.fonts["large"].render("Dev Tools", True, DEV_COL)
+                    self.screen.blit(dtitle, (DPX + DPW // 2 - dtitle.get_width() // 2, DPY + 14))
+                    pygame.draw.line(self.screen, (70, 55, 30),
+                                     (DPX + 16, DPY + 50), (DPX + DPW - 16, DPY + 50), 1)
+
+                    # Wave status hint
+                    if self.wave_active and self.boss_wave:
+                        wave_hint = f"Boss wave {self.wave}"
+                    elif self.wave_active and self.elite_wave:
+                        wave_hint = f"CORRUPTION Wave {self.wave}  —  {sum(1 for e in self.enemies if e.alive)} alive"
+                    elif self.wave_active:
+                        wave_hint = f"Wave {self.wave}  —  {sum(1 for e in self.enemies if e.alive)} alive"
+                    else:
+                        wave_hint = f"Wave {self.wave} — break"
+                    wh = self.fonts["tiny"].render(wave_hint, True, GRAY)
+                    self.screen.blit(wh, (DPX + DPW // 2 - wh.get_width() // 2, DPY + 53))
+
+                    # Four buttons
+                    skip_col  = (255, 100, 100)
+                    boss_col  = (255, 120, 200)
+                    next_wave = self.wave + 1 if not self.wave_active else self.wave
+                    boss_label = "▾ Skip to Boss Wave" if self.dev_boss_expand else "▸ Skip to Boss Wave"
+                    for label, val_str, col, row in [
+                        ("+100 Gold",   f"Current: {self.player.gold}g",      YELLOW,   0),
+                        ("+1 Level",    f"Current: Lvl {self.player.level}",  CYAN,     1),
+                        ("Skip Wave",   f">> Wave {next_wave}",               skip_col, 2),
+                        (boss_label,    "pick a boss below" if self.dev_boss_expand else "expand to pick", boss_col, 3),
+                    ]:
+                        btn = pygame.Rect(DPX + 20, DPY + 70 + row * 56, DPW - 40, 44)
+                        pygame.draw.rect(self.screen, lerp_color(PANEL, col, 0.22), btn, border_radius=8)
+                        pygame.draw.rect(self.screen, col, btn, 1, border_radius=8)
+                        bl = self.fonts["med"].render(label, True, col)
+                        self.screen.blit(bl, (btn.x + 14, btn.centery - bl.get_height() // 2))
+                        vl = self.fonts["small"].render(val_str, True, GRAY)
+                        self.screen.blit(vl, (btn.right - vl.get_width() - 14,
+                                              btn.centery - vl.get_height() // 2))
+
+                    # Boss picker sub-list
+                    if self.dev_boss_expand:
+                        pygame.draw.line(self.screen, (70, 55, 30),
+                                         (DPX + 16, DPY + 290), (DPX + DPW - 16, DPY + 290), 1)
+                        boss_colors = [
+                            (220, 60,  60),
+                            (200, 80,  255),
+                            (80,  180, 80),
+                            (255, 220, 60),
+                            (80,  80,  220),
+                        ]
+                        for bi, bt in enumerate(BOSS_TYPES):
+                            bcol     = boss_colors[bi % len(boss_colors)]
+                            boss_btn = pygame.Rect(DPX + 20, DPY + 294 + bi * 34, DPW - 40, 28)
+                            pygame.draw.rect(self.screen, lerp_color(PANEL, bcol, 0.18),
+                                             boss_btn, border_radius=6)
+                            pygame.draw.rect(self.screen, bcol, boss_btn, 1, border_radius=6)
+                            bn = self.fonts["small"].render(bt["name"], True, bcol)
+                            self.screen.blit(bn, (boss_btn.x + 10,
+                                                   boss_btn.centery - bn.get_height() // 2))
+
+                    close_d = self.fonts["tiny"].render(
+                        "Click outside or press P / ESC to close", True, GRAY)
+                    self.screen.blit(close_d, (DPX + DPW // 2 - close_d.get_width() // 2,
+                                               DPY + DPH - 22))
+
+            # ── Corruption wave screen flash ───────────────────────────────────
+            if self.corruption_flash_timer > 0:
+                self.corruption_flash_timer -= 1
+                t = self.corruption_flash_timer / 90.0   # 1.0 → 0.0
+                # Pulsing: peaks at t=0.85 (fast rise) then fades to 0
+                pulse = math.sin(t * math.pi)
+                alpha = max(0, min(180, int(180 * pulse)))
+                if alpha > 0:
+                    cf = pygame.Surface((SW, SH), pygame.SRCALPHA)
+                    cf.fill((120, 0, 180, alpha))
+                    self.screen.blit(cf, (0, 0))
+                # Banner — fades in then holds then fades
+                if t > 0.15:
+                    banner_alpha = max(0, min(255, int(255 * min(1.0, (t - 0.15) * 3))))
+                    COR_COL = (220, 80, 255)
+                    bw2 = 560; bh2 = 70
+                    bx2 = SW // 2 - bw2 // 2; by2 = SH // 2 - bh2 // 2 - 40
+                    bs = pygame.Surface((bw2, bh2), pygame.SRCALPHA)
+                    bs.fill((30, 0, 50, min(220, banner_alpha)))
+                    pygame.draw.rect(bs, (*COR_COL, banner_alpha), (0, 0, bw2, bh2), 3, border_radius=10)
+                    self.screen.blit(bs, (bx2, by2))
+                    ctitle = self.fonts["huge"].render("CORRUPTION WAVE", True, COR_COL)
+                    ctitle.set_alpha(banner_alpha)
+                    self.screen.blit(ctitle, (SW // 2 - ctitle.get_width() // 2, by2 + 14))
+
+            pygame.display.flip()
+
+
+# ── Entry point ───────────────────────────────────────────────────────────────
+
+if __name__ == "__main__":
+    _screen = pygame.display.set_mode((SW, SH))
+    pygame.display.set_caption("Dungeon Crawler 37.0b9")
+
+    # Window icon
+    _icon_path = asset("icon.png")
+    if os.path.isfile(_icon_path):
+        try:
+            pygame.display.set_icon(pygame.image.load(_icon_path))
+        except pygame.error as e:
+            print(f"[Icon] Could not load icon.png: {e}")
+
+    _clock  = pygame.time.Clock()
+    _fonts  = {
+        "large": pygame.font.SysFont("consolas", 28, bold=True),
+        "med":   pygame.font.SysFont("consolas", 20, bold=True),
+        "small": pygame.font.SysFont("consolas", 15),
+        "tiny":  pygame.font.SysFont("consolas", 13),
+        "huge":  pygame.font.SysFont("consolas", 48, bold=True),
+    }
+    while True:
+        chosen_name = username_screen(_screen, _clock, _fonts)
+        Game(username=chosen_name).run()
