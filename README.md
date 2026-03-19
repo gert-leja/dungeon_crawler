@@ -5,7 +5,7 @@ A fast-paced game where a lone orb battles waves of hostile orbs.
 ---
 
 ## About the Game
-**Dungeon Crawler** is a Python-based project built entirely using the Pygame library.
+**Dungeon Crawler** is a Python-based project built entirely using the Pygame and cv2 libraries.
 
 ---
 
