@@ -1,6 +1,6 @@
 # Dungeon Crawler
 
-> A fast-paced game where a lone orb battles waves of hostile orbs.
+A fast-paced game where a lone orb battles waves of hostile orbs.
 
 ---
 
