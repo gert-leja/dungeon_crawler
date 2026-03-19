@@ -1,8 +1,27 @@
 # Dungeon Crawler
-A game about an orb destroying other orbs
 
-This game was built entirely in Python using the Pygame library.
+> A fast-paced game where a lone orb battles waves of hostile orbs.
 
-Log issues in the Issues tab in this repo.
+---
 
-No assets are included in this repository.
+## About the Game
+**Dungeon Crawler** is a Python-based project built entirely using the Pygame library.  
+The focus is on simple mechanics, smooth gameplay, and a clean visual style.
+
+---
+
+## Tech Stack
+- Python  
+- Pygame  
+
+---
+
+## Assets
+**Note:** No assets are included in this repository.
+
+---
+
+## Playtesting
+Playtesters are encouraged to help improve the game.
+
+Please report any bugs, issues, or suggestions in the **Issues** tab of this repository.
