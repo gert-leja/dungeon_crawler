@@ -7,10 +7,7 @@
 ## About the Game
 **Dungeon Crawler** is a Python-based project built entirely using the Pygame library.  
 The focus is on simple mechanics, smooth gameplay, and a clean visual style.
-
----
-
-Built entirely using Python with the Pygame library
+Built entirely using Python with the Pygame library.
 
 ---
 
