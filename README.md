@@ -10,9 +10,7 @@ The focus is on simple mechanics, smooth gameplay, and a clean visual style.
 
 ---
 
-## Tech Stack
-- Python  
-- Pygame  
+Built entirely using Python with the Pygame library
 
 ---
 
