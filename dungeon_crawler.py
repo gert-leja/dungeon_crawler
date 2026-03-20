@@ -83,7 +83,8 @@ class Music:
     EXTENSIONS = [".ogg", ".mp3", ".wav"]
 
     def __init__(self):
-        self._current = None   # track key currently loaded/playing
+        self._current          = None   # track key currently loaded/playing
+        self._resume_offset_s  = 0.0   # file-position offset from the last seek
         self.enabled  = pygame.mixer.get_init() is not None
         self.volume   = 0.5
         if self.enabled:
@@ -114,7 +115,8 @@ class Music:
             pygame.mixer.music.load(path)
             pygame.mixer.music.set_volume(self.volume)
             pygame.mixer.music.play(loops, fade_ms=fadein)
-            self._current = key
+            self._current         = key
+            self._resume_offset_s = 0.0   # fresh start — reset accumulated offset
         except pygame.error as e:
             print(f"[Music] Could not play '{path}': {e}")
 
@@ -130,6 +132,44 @@ class Music:
         if not self.enabled: return
         pygame.mixer.music.fadeout(fadeout)
         self._current = None
+
+    def pause_resume(self):
+        """Snapshot the current track key and true file position so
+        unpause_resume() can reload it and seek back to exactly this point.
+        Call this BEFORE loading any other track."""
+        if not self.enabled:
+            return
+        self._paused_key = self._current
+        # get_pos() only measures time since the last play() / seek, not since
+        # the start of the file.  Add _resume_offset_s (the file position we
+        # seeked to on the last resume) to get the true file position.
+        elapsed = max(0.0, pygame.mixer.music.get_pos() / 1000.0)
+        self._paused_pos_s = self._resume_offset_s + elapsed
+
+    def unpause_resume(self):
+        """Reload the track saved by pause_resume() and seek to the saved position.
+        No-op if pause_resume() was never called or no track was playing."""
+        if not self.enabled:
+            return
+        key     = getattr(self, "_paused_key",  None)
+        pos_s   = getattr(self, "_paused_pos_s", 0.0)
+        self._paused_key   = None
+        self._paused_pos_s = 0.0
+        if not key:
+            return
+        path = self._find(key)
+        if path is None:
+            return
+        try:
+            pygame.mixer.music.load(path)
+            pygame.mixer.music.set_volume(self.volume)
+            # play(loops, start=seconds) seeks to the saved position instantly,
+            # no fade-in so the resumption feels immediate
+            pygame.mixer.music.play(-1, start=pos_s)
+            self._current         = key
+            self._resume_offset_s = pos_s   # remember where we seeked to
+        except pygame.error as e:
+            print(f"[Music] Could not resume '{path}': {e}")
 
     def set_volume(self, vol):
         self.volume = max(0.0, min(1.0, vol))
@@ -521,34 +561,31 @@ DARK   = (18, 18, 28)
 PANEL  = (28, 28, 42)
 
 WAVE_BREAK_SECS = 10
-GAME_VERSION    = "40.1 Build 3"
+GAME_VERSION    = "41.0 Build 2"
 
 # ── Patch notes (2 most recent, newest first) ─────────────────────────────────
 # Each entry: {"version": str, "date": str, "changes": [("category", "text"), ...]}
 # Categories: "added", "changed", "fixed", "removed"
 PATCH_NOTES = [
     {
-        "version": "40.1",
+        "version": "41.0",
         "date":    "20-03-2026",
         "changes": [
-            ("added",   "New cosmetic called 'Ironhide', requires 15 Gorvak Ironhide kills and 12 tokens."),
-            ("changed",   "Gorvak's minions now have a shooting cooldown in enraged mode."),
+            ("changed",   "Vexara boss arena recieved a complete overhaul"),
         ],
     },
     {
-        "version": "40.0",
+        "version": "40.2",
         "date":    "20-03-2026",
         "changes": [
-            ("fixed",   "a redundant variable in corrupted homing section optimised."),
-            ("fixed",   "seraph wings allocating a fresh Surface per feather barb, which are not drawn but called anyway."),
-            ("fixed",   "double math.hypot call for homing projectiles."),
+            ("fixed",   "boss music not playing when closing shop during boss battle."),
+            ("changed",   "boss and regular battle music now pauses and resumes from where it left off if interrupted by the shop."),
         ],
     },
 ]
-
 # ── Cosmetics ─────────────────────────────────────────────────────────────────
 # Each cosmetic: id (str), name, description, cost (tokens), pattern key
-# Patterns are drawn procedurally in Player.draw
+# Patterns are drawn procedurally in Player.draw — no image files needed.
 # Add new entries here and handle their pattern key in Player.draw.
 
 COSMETICS = [
@@ -5259,7 +5296,7 @@ class Game:
     def __init__(self, username="Player"):
         self.screen   = pygame.display.set_mode((SW, SH))
         self._overlay = pygame.Surface((SW, SH), pygame.SRCALPHA)  # reused every frame
-        pygame.display.set_caption("Dungeon Crawler 40.1b3")
+        pygame.display.set_caption("Dungeon Crawler 41.0b2")
         self.clock    = pygame.time.Clock()
         self.world_w  = 3000; self.world_h = 3000
         self.username = username
@@ -5321,6 +5358,9 @@ class Game:
         self.vex_zap_cd             = 0
         self.vex_runes              = []      # slow drifting hex rune shapes [wx, wy, angle, spin, life, max_life]
         self.vex_rune_cd            = 0
+        self.vex_cracks             = []      # pre-generated world-space corruption cracks [[pts,...],...]
+        self.vex_wisps              = []      # drifting void wisps [wx, wy, vx, vy, life, max_life, size]
+        self.vex_wisp_cd            = 0
         # Nyxoth arena visuals
         self.nyx_stars              = []      # static star field [sx, sy, radius, brightness]
         self.nyx_nebulas            = []      # drifting nebula blobs [wx, wy, r, col, alpha]
@@ -5479,6 +5519,25 @@ class Game:
                     pts.append((cx2, cy2))
                 self.gorv_chains.append([pts, random.randint(2, 4)])
 
+        # Generate Vexara corrupted arena — cracks radiating from the centre
+        if bt["pattern"] == "spiral":
+            self.vex_cracks = []
+            ccx = self.world_w // 2
+            ccy = self.world_h // 2
+            for _ in range(20):
+                ang = random.uniform(0, math.pi * 2)
+                pts = [(float(ccx), float(ccy))]
+                cx2, cy2 = float(ccx), float(ccy)
+                length = random.randint(180, 580)
+                segs   = random.randint(5, 12)
+                seg_l  = length / segs
+                for _ in range(segs):
+                    ang  += random.uniform(-0.55, 0.55)
+                    cx2   = max(20, min(self.world_w - 20, cx2 + math.cos(ang) * seg_l))
+                    cy2   = max(20, min(self.world_h - 20, cy2 + math.sin(ang) * seg_l))
+                    pts.append((cx2, cy2))
+                self.vex_cracks.append(pts)
+
     def _on_boss_killed(self):
         b = self.boss
         self.boss_killed += 1
@@ -5508,6 +5567,8 @@ class Game:
         self.sera_motes   = []
         self.gorv_lanterns = []
         self.gorv_chains   = []
+        self.vex_cracks    = []
+        self.vex_wisps     = []
         # Clear all lingering enemy projectiles so the player can't be hit after the kill
         self.projectiles = [p for p in self.projectiles if p.owner == "player"]
         self.fire_orbs   = []
@@ -5702,15 +5763,131 @@ class Game:
                         pygame.draw.rect(self.screen, tc,
                                          (gx * tile - ox, gy * tile - oy, tile - 1, tile - 1))
 
-            if not is_normal and not is_seraphix and not is_gorvak:
-                # Elite / boss-specific tiles (solid colour)
+            if not is_normal and not is_seraphix and not is_gorvak and not is_vexara:
+                # Elite / boss-specific tiles (solid colour — Nyxoth only now)
                 if self.elite_wave: tc2 = (30, 18, 48)
-                elif is_vexara:     tc2 = (24, 12, 44)
                 else:               tc2 = (4, 4, 10)
                 for gx in range(-1, SW // tile + 2):
                     for gy in range(-1, SH // tile + 2):
                         pygame.draw.rect(self.screen, tc2,
                                          (gx * tile - ox, gy * tile - oy, tile - 1, tile - 1))
+
+        # ── Vexara: corrupted hex floor + glowing cracks + summoning circle ──────
+        if is_vexara:
+            t_vex = pygame.time.get_ticks()
+            acx   = int(self.world_w // 2 - cam[0])   # arena centre screen-x
+            acy   = int(self.world_h // 2 - cam[1])   # arena centre screen-y
+
+            # ── Hex tile grid (flat-top hexagons) ─────────────────────────────
+            hex_s  = 44
+            col_w  = int(hex_s * 1.5)              # 66 px centre-to-centre horizontally
+            row_h  = int(hex_s * 0.8660 * 2)       # ≈76 px centre-to-centre vertically
+            half_r = row_h // 2
+
+            gc_start = cam[0] // col_w - 1
+            gc_end   = (cam[0] + SW) // col_w + 2
+            gr_start = cam[1] // row_h - 1
+            gr_end   = (cam[1] + SH) // row_h + 2
+
+            for gc in range(gc_start, gc_end):
+                for gr in range(gr_start, gr_end):
+                    hcx = gc * col_w - cam[0]
+                    hcy = gr * row_h + (half_r if gc % 2 else 0) - cam[1]
+                    if -hex_s * 2 < hcx < SW + hex_s * 2 and -hex_s * 2 < hcy < SH + hex_s * 2:
+                        shade    = (gc * 7 + gr * 13) % 6
+                        glow_hex = (gc * 11 + gr * 17) % 22 == 0   # ~1 in 22 hexes glows
+                        crack_hex= (gc * 5  + gr * 19) % 15 == 0   # fractured hex variant
+                        if glow_hex:
+                            tc = (42, 8, 78)     # corruption-glow hex
+                        elif crack_hex:
+                            tc = (30, 6, 56)     # fractured darker
+                        elif shade < 2:
+                            tc = (18, 7, 32)     # darkest base
+                        elif shade < 4:
+                            tc = (22, 10, 40)    # mid base
+                        else:
+                            tc = (26, 13, 48)    # slightly lighter
+                        pts = [(hcx + int(math.cos(math.pi / 3 * i) * hex_s),
+                                hcy + int(math.sin(math.pi / 3 * i) * hex_s))
+                               for i in range(6)]
+                        pygame.draw.polygon(self.screen, tc, pts)
+                        # Outline — glowing hexes get a brighter void-purple edge
+                        edge_col = (68, 18, 118) if glow_hex else (34, 14, 60)
+                        pygame.draw.polygon(self.screen, edge_col, pts, 1)
+                        # Fractured hexes: draw a jagged crack line across them
+                        if crack_hex:
+                            ca = (gc * 3 + gr * 7) % 6   # pick a random axis
+                            cx1h = hcx + int(math.cos(math.pi / 3 * ca) * (hex_s - 8))
+                            cy1h = hcy + int(math.sin(math.pi / 3 * ca) * (hex_s - 8))
+                            cx2h = hcx + int(math.cos(math.pi / 3 * ((ca + 3) % 6)) * (hex_s - 8))
+                            cy2h = hcy + int(math.sin(math.pi / 3 * ((ca + 3) % 6)) * (hex_s - 8))
+                            pygame.draw.line(self.screen, (55, 10, 95),
+                                             (cx1h, cy1h), (cx2h, cy2h), 1)
+
+            # ── Pre-generated corruption cracks radiating from the centre ──────
+            for crack_pts in self.vex_cracks:
+                s_pts = [(int(wx - cam[0]), int(wy - cam[1])) for wx, wy in crack_pts]
+                if not any(-60 < sx < SW + 60 and -60 < sy < SH + 60 for sx, sy in s_pts):
+                    continue
+                if len(s_pts) >= 2:
+                    glow_t   = math.sin(t_vex * 0.0018 + crack_pts[0][0] * 0.001) * 0.5 + 0.5
+                    c_glow   = (max(0, min(255, int(80 + glow_t * 80))),
+                                0,
+                                max(0, min(255, int(130 + glow_t * 90))))
+                    c_dim    = (max(0, min(255, int(25 + glow_t * 18))),
+                                0,
+                                max(0, min(255, int(45 + glow_t * 30))))
+                    pygame.draw.lines(self.screen, c_dim,  False, s_pts, 3)
+                    pygame.draw.lines(self.screen, c_glow, False, s_pts, 1)
+
+            # ── Central summoning / ritual circle ─────────────────────────────
+            if -360 < acx < SW + 360 and -360 < acy < SH + 360:
+                ring_t = t_vex * 0.0010
+
+                # Outer ward rings — 4 concentric circles, each pulsing slightly
+                for ri, rr in enumerate([340, 270, 210, 150]):
+                    rp    = math.sin(ring_t + ri * 0.9) * 0.5 + 0.5
+                    r_col = (max(0, min(255, int(55 + rp * 65))),
+                             0,
+                             max(0, min(255, int(90 + rp * 90))))
+                    pygame.draw.circle(self.screen, r_col, (acx, acy), rr,
+                                       2 if ri % 2 == 0 else 1)
+
+                # Two counter-rotating triangles forming a 6-pointed void star
+                for tri in range(2):
+                    spin = ring_t * (0.25 if tri == 0 else -0.18)
+                    tri_pts = []
+                    for i in range(3):
+                        a = spin + (math.pi * 2 / 3) * i + (math.pi / 6 if tri else 0)
+                        tri_pts.append((acx + int(math.cos(a) * 290),
+                                        acy + int(math.sin(a) * 290)))
+                    star_p = math.sin(ring_t * 1.5 + tri) * 0.5 + 0.5
+                    star_col = (max(0, min(255, int(60 + star_p * 60))),
+                                0,
+                                max(0, min(255, int(100 + star_p * 80))))
+                    pygame.draw.polygon(self.screen, star_col, tri_pts, 1)
+
+                # 12 radial spokes fanning out from centre — slowly rotating
+                spoke_spin = ring_t * 0.18
+                for si in range(12):
+                    sang    = (math.pi * 2 / 12) * si + spoke_spin
+                    sp      = math.sin(ring_t * 2.2 + si * 0.55) * 0.5 + 0.5
+                    sc      = (max(0, min(255, int(40 + sp * 40))),
+                               0,
+                               max(0, min(255, int(65 + sp * 65))))
+                    ex2 = acx + int(math.cos(sang) * 340)
+                    ey2 = acy + int(math.sin(sang) * 340)
+                    pygame.draw.line(self.screen, sc, (acx, acy), (ex2, ey2), 1)
+
+                # Inner void rings
+                pygame.draw.circle(self.screen, (48, 0, 88),  (acx, acy), 90, 3)
+                pygame.draw.circle(self.screen, (65, 0, 115), (acx, acy), 58, 2)
+                void_p   = math.sin(ring_t * 2.8) * 0.5 + 0.5
+                void_col = (max(0, min(255, int(90 + void_p * 70))),
+                            0,
+                            max(0, min(255, int(145 + void_p * 90))))
+                pygame.draw.circle(self.screen, void_col, (acx, acy), 26, 2)
+                pygame.draw.circle(self.screen, (12, 0, 24), (acx, acy), 14)  # true void core
 
         # ── Normal arena floor details ────────────────────────────────────────
         if is_normal:
@@ -5949,6 +6126,12 @@ class Game:
             pygame.draw.rect(self.screen, (30, 24, 18), (bx, by, self.world_w, self.world_h), 14)
             pygame.draw.rect(self.screen, (55, 46, 36), (bx, by, self.world_w, self.world_h), 5)
             pygame.draw.rect(self.screen, (80, 68, 52), (bx, by, self.world_w, self.world_h), 2)
+        elif is_vexara:
+            # Corrupted void wall — deep purple layers bleeding inward
+            pygame.draw.rect(self.screen, (8,  0,  16),  (bx, by, self.world_w, self.world_h), 20)
+            pygame.draw.rect(self.screen, (25, 4,  50),  (bx, by, self.world_w, self.world_h), 10)
+            pygame.draw.rect(self.screen, (50, 8,  90),  (bx, by, self.world_w, self.world_h), 5)
+            pygame.draw.rect(self.screen, (80, 16, 140), (bx, by, self.world_w, self.world_h), 2)
         else:
             wall_col  = (50, 55, 75) if is_normal else (60, 20, 80) if (is_vexara or self.elite_wave) else (60, 20, 20) if is_malachar else (20, 20, 50)
             wall_col2 = (30, 34, 48) if is_normal else (40, 10, 60) if (is_vexara or self.elite_wave) else (40, 10, 10) if is_malachar else (10, 10, 30)
@@ -6388,9 +6571,10 @@ class Game:
                     if event.key == pygame.K_TAB:
                         self.shop.toggle()
                         if self.shop.open:
+                            MUSIC.pause_resume()   # snapshot position of whatever is playing
                             MUSIC.play("shop")
                         else:
-                            MUSIC.play("battle")
+                            MUSIC.unpause_resume() # resume battle or boss track mid-bar
                     if self.shop.open:
                         self.shop.handle_key(event.key, self.player, self.floating_texts)
                 if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1 and self.shop.open:
@@ -7016,6 +7200,79 @@ class Game:
                     else:
                         self.vex_runes = [r for r in self.vex_runes if r[4] > 0]
 
+                    # ── Void wisps — drifting upward corruption motes ─────────
+                    self.vex_wisp_cd -= 1
+                    if self.vex_wisp_cd <= 0:
+                        self.vex_wisp_cd = random.randint(4, 12)
+                        # Spawn on or near the floor cracks and summoning circle
+                        spawn_mode = random.randint(0, 2)
+                        if spawn_mode == 0 and self.vex_cracks:
+                            # Along a random crack
+                            crack = random.choice(self.vex_cracks)
+                            pt    = random.choice(crack)
+                            wx2, wy2 = pt[0], pt[1]
+                        elif spawn_mode == 1:
+                            # Near the summoning circle centre
+                            ang = random.uniform(0, math.pi * 2)
+                            r2  = random.randint(0, 300)
+                            wx2 = self.world_w // 2 + math.cos(ang) * r2
+                            wy2 = self.world_h // 2 + math.sin(ang) * r2
+                        else:
+                            # Random on screen
+                            wx2 = cam[0] + random.randint(0, SW)
+                            wy2 = cam[1] + random.randint(0, SH)
+                        self.vex_wisps.append([
+                            float(wx2), float(wy2),
+                            random.uniform(-0.35, 0.35),    # vx drift
+                            random.uniform(-1.2, -0.3),     # vy upward
+                            random.randint(50, 120),
+                            random.randint(50, 120),
+                            random.randint(2, 5),           # size
+                        ])
+
+                    # Update and draw wisps — two-tone void colour fading out
+                    surviving_w = []
+                    for w in self.vex_wisps:
+                        w[0] += w[2]; w[1] += w[3]
+                        w[4] -= 1
+                        if w[4] > 0:
+                            surviving_w.append(w)
+                            wt  = w[4] / w[5]               # 1 → 0
+                            wsx = int(w[0] - cam[0])
+                            wsy = int(w[1] - cam[1])
+                            if -10 < wsx < SW + 10 and -10 < wsy < SH + 10:
+                                wr  = max(1, int(w[6] * wt))
+                                # Inner core: bright pink-white; outer: deep purple
+                                wc_inner = (max(0, min(255, int(200 + wt * 55))),
+                                            max(0, min(255, int(wt * 80))),
+                                            max(0, min(255, int(220 + wt * 35))))
+                                wc_outer = (max(0, min(255, int(80 + wt * 60))),
+                                            0,
+                                            max(0, min(255, int(120 + wt * 80))))
+                                if wr > 1:
+                                    pygame.draw.circle(self.screen, wc_outer, (wsx, wsy), wr)
+                                pygame.draw.circle(self.screen, wc_inner, (wsx, wsy), max(1, wr - 1))
+                    self.vex_wisps = surviving_w
+
+                    # ── Summoning circle overlay glow (over all game objects) ──
+                    # Soft expanding/contracting void ring centred on arena centre
+                    acx_ov = int(self.world_w // 2 - cam[0])
+                    acy_ov = int(self.world_h // 2 - cam[1])
+                    if -500 < acx_ov < SW + 500 and -500 < acy_ov < SH + 500:
+                        ring_t_ov = t_now * 0.0010
+                        # Three pulsing glow rings drawn directly — no Surface alloc
+                        for ri, base_r in enumerate([148, 100, 55]):
+                            rp     = math.sin(ring_t_ov * 1.4 + ri * 1.1) * 0.5 + 0.5
+                            cr     = max(1, int(base_r + rp * 14) - ri * 2)
+                            bright = max(0, int(55 + rp * 55) - ri * 14)
+                            ov_col = (max(0, min(255, bright // 2)),
+                                      0,
+                                      max(0, min(255, bright)))
+                            if bright > 6 and cr > 0:
+                                pygame.draw.circle(self.screen, ov_col,
+                                                   (acx_ov, acy_ov), cr,
+                                                   2 if ri < 2 else 1)
+
                 # ── Corruption wave ambient overlay (world-space, under HUD) ──
                 if self.elite_wave:
                     self._overlay.fill((40, 0, 60, 55))
@@ -7310,7 +7567,7 @@ class Game:
 
 if __name__ == "__main__":
     _screen = pygame.display.set_mode((SW, SH))
-    pygame.display.set_caption("Dungeon Crawler 40.1b3")
+    pygame.display.set_caption("Dungeon Crawler 41.0b2")
 
     # Window icon
     _icon_path = asset("icon.png")
