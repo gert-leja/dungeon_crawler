@@ -380,6 +380,9 @@ class TokenWallet:
         self.active_cosmetic  = data.get("active_cosmetic", "default")
         self.seraphix_kills   = max(0, int(data.get("seraphix_kills", 0)))
         self.nyxoth_kills     = max(0, int(data.get("nyxoth_kills", 0)))
+        self.vexara_kills     = max(0, int(data.get("vexara_kills", 0)))
+        self.malachar_kills   = max(0, int(data.get("malachar_kills", 0)))
+        self.gorvak_kills     = max(0, int(data.get("gorvak_kills", 0)))
         # Validation against COSMETICS happens lazily in sync_to_player()
         # because COSMETICS isn't defined yet when TOKENS is first created.
 
@@ -409,6 +412,9 @@ class TokenWallet:
                     "active_cosmetic": self.active_cosmetic,
                     "seraphix_kills":  self.seraphix_kills,
                     "nyxoth_kills":    self.nyxoth_kills,
+                    "vexara_kills":    self.vexara_kills,
+                    "malachar_kills":  self.malachar_kills,
+                    "gorvak_kills":    self.gorvak_kills,
                 }, f, indent=2)
         except Exception as e:
             print(f"[Tokens] Could not save: {e}")
@@ -441,11 +447,23 @@ class TokenWallet:
         self.nyxoth_kills += 1
         self._save()
 
+    def record_vexara_kill(self):
+        self.vexara_kills += 1
+        self._save()
 
-# Global wallet - loaded once, shared by all runs in a session
+    def record_malachar_kill(self):
+        self.malachar_kills += 1
+        self._save()
+
+    def record_gorvak_kill(self):
+        self.gorvak_kills += 1
+        self._save()
+
+
+# Global wallet — loaded once, shared by all runs in a session
 TOKENS = TokenWallet()
 
-# -- Game settings (persisted next to exe) -------------------------------
+# ── Game settings (persisted next to exe) ─────────────────────────────────────
 
 SETTINGS_FILE  = os.path.join(DATA_DIR, "settings.json")
 FIRST_RUN_FILE = os.path.join(DATA_DIR, "first_run.json")
@@ -503,41 +521,34 @@ DARK   = (18, 18, 28)
 PANEL  = (28, 28, 42)
 
 WAVE_BREAK_SECS = 10
-GAME_VERSION    = "37.0 Build 9"
+GAME_VERSION    = "40.1 Build 3"
 
 # ── Patch notes (2 most recent, newest first) ─────────────────────────────────
 # Each entry: {"version": str, "date": str, "changes": [("category", "text"), ...]}
 # Categories: "added", "changed", "fixed", "removed"
 PATCH_NOTES = [
     {
-        "version": "37.0",
-        "date":    "18-03-2026",
+        "version": "40.1",
+        "date":    "20-03-2026",
         "changes": [
-            ("changed",   "Optimisation changes to the boss battle arena code."),
-            ("changed",   "Optimisation changes to the BossIntro code."),
-            ("changed",   "Menu bg video and slideshow images have been updated."),
-            ("changed",   "Updated game logo."),
-            ("changed",   "Updated game title."),
+            ("added",   "New cosmetic called 'Ironhide', requires 15 Gorvak Ironhide kills and 12 tokens."),
+            ("changed",   "Gorvak's minions now have a shooting cooldown in enraged mode."),
         ],
     },
     {
-        "version": "36.3",
-        "date":    "18-03-2026",
+        "version": "40.0",
+        "date":    "20-03-2026",
         "changes": [
-            ("changed",   "Player movement speed and weapon firing speed no longer scales with level."),
-            ("changed",   "Malachar's dash range in enraged mode is reduced."),
-            ("changed",   "Malachar's visuals have been reworked"),
-            ("fixed",   "Malachar being killed before spawning."),
-            ("fixed",   "UnboundLocalError: flash, causing a game crash when trying to draw Malachar."),
-            ("fixed",   "a tuple unpacking causing float contamination and crashing the game."),
+            ("fixed",   "a redundant variable in corrupted homing section optimised."),
+            ("fixed",   "seraph wings allocating a fresh Surface per feather barb, which are not drawn but called anyway."),
+            ("fixed",   "double math.hypot call for homing projectiles."),
         ],
     },
 ]
 
-
 # ── Cosmetics ─────────────────────────────────────────────────────────────────
 # Each cosmetic: id (str), name, description, cost (tokens), pattern key
-# Patterns are drawn procedurally in Player.draw - no image files needed.
+# Patterns are drawn procedurally in Player.draw
 # Add new entries here and handle their pattern key in Player.draw.
 
 COSMETICS = [
@@ -607,14 +618,41 @@ COSMETICS = [
         "preview": (20, 0, 60),
         "req_nyxoth_kills": 15,
     },
+    {
+        "id":      "hexweaver",
+        "name":    "Hex Weaver",
+        "desc":    "Chaos orbits those who dare",
+        "cost":    12,
+        "pattern": "hexweaver",
+        "preview": (140, 0, 200),
+        "req_vexara_kills": 15,
+    },
+    {
+        "id":      "lavalord",
+        "name":    "Lava Lord",
+        "desc":    "Forged in eternal fire",
+        "cost":    12,
+        "pattern": "lavalord",
+        "preview": (180, 40, 0),
+        "req_malachar_kills": 15,
+    },
+    {
+        "id":      "ironhide",
+        "name":    "Ironhide",
+        "desc":    "Forged from Gorvak's armour",
+        "cost":    12,
+        "pattern": "ironhide",
+        "preview": (75, 88, 100),
+        "req_gorvak_kills": 15,
+    },
 ]
 
 # ── Tips (shown on main menu, rotating yellow text) ──────────────────────────
 # Add, remove, or edit tips freely — they cycle one at a time.
 MENU_TIPS = [
-    "Bosses drop 1 Token when defeated - spend them in the Token Shop!",
+    "Bosses drop 1 Token when defeated — spend them in the Token Shop!",
     "If you are struggling, try to get the enemy's health below 0 before your health reaches 0, works every time!",
-    "Beat multiple Corruption Waves to unlock Corrupted weapons!",
+    "Complete multiple Corruption Waves to unlock Corrupted weapons!",
     "Corrupted enemies drop more gold and XP than regular ones, but are also more difficult.",
     "You get a choice of 3 perk cards every 5 waves, they can make your run easier, if you get lucky!",
     "Avoid staying in one spot for too long, enemies will try to corner you at any chance!",
@@ -751,7 +789,7 @@ SPECIAL_WEAPONS = [
 
 ENEMY_TYPES = [
     # Slime — splits into two tiny slimes on death, bounces erratically
-    {"name": "Slime",    "base_hp": 35,  "base_dmg": 6,  "base_spd": 1.2,  "gold": 3,  "color": GREEN,         "size": 14, "xp": 12,  "behaviour": "bounce"},
+    {"name": "Slime",    "base_hp": 35,  "base_dmg": 6,  "base_spd": 2.4,  "gold": 3,  "color": GREEN,         "size": 14, "xp": 12,  "behaviour": "bounce"},
     # Goblin — fast, dashes at player every few seconds
     {"name": "Goblin",   "base_hp": 55,  "base_dmg": 10, "base_spd": 1.8,  "gold": 6,  "color": ORANGE,        "size": 15, "xp": 22,  "behaviour": "dash"},
     # Orc — slow tank that briefly spins and fires 6 projectiles when hurt below 50 %
@@ -776,15 +814,15 @@ def elite_wave_chance(player_level):
 # in Enemy.update via self.elite flag.
 ELITE_VARIANTS = [
     # Elite Slime  → "Plague Slime"  — toxic green/black, splits into 3 elite splinters, acid trail
-    {"name": "Plague Slime",  "color": (30, 180, 60),   "glow": (0, 80, 0),    "hp_mult": 2.0, "dmg_mult": 1.6, "spd_mult": 1.3, "size_add": 4},
+    {"name": "Plague Slime",  "color": (30, 180, 60),   "glow": (0, 80, 0),    "hp_mult": 2.0, "dmg_mult": 1.3, "spd_mult": 1.3, "size_add": 4},
     # Elite Goblin → "Shadow Stalker" — dark purple, double-dashes, leaves shadow traps
-    {"name": "Shadow Stalker","color": (80, 20, 140),   "glow": (160, 0, 255), "hp_mult": 1.8, "dmg_mult": 1.7, "spd_mult": 1.5, "size_add": 2},
+    {"name": "Shadow Stalker","color": (80, 20, 140),   "glow": (160, 0, 255), "hp_mult": 1.8, "dmg_mult": 1.4, "spd_mult": 1.5, "size_add": 2},
     # Elite Orc    → "Berserker Orc" — dark red/gold, permanent rage aura, 3-shot cannon
-    {"name": "Berserker Orc", "color": (160, 20, 0),    "glow": (255, 120, 0), "hp_mult": 2.2, "dmg_mult": 2.0, "spd_mult": 1.2, "size_add": 6},
+    {"name": "Berserker Orc", "color": (160, 20, 0),    "glow": (255, 120, 0), "hp_mult": 2.2, "dmg_mult": 1.6, "spd_mult": 1.2, "size_add": 6},
     # Elite Mage   → "Void Mage"     — deep blue/white, 5-way spread, rapid blink-fire combos
-    {"name": "Void Mage",     "color": (10, 10, 120),   "glow": (100, 180, 255),"hp_mult": 1.7,"dmg_mult": 1.8, "spd_mult": 1.3, "size_add": 2},
+    {"name": "Void Mage",     "color": (10, 10, 120),   "glow": (100, 180, 255),"hp_mult": 1.7,"dmg_mult": 1.5, "spd_mult": 1.3, "size_add": 2},
     # Elite Dragon → "Inferno Drake" — black/orange, lays 3 fire orbs, fires 4-way spread
-    {"name": "Inferno Drake", "color": (20, 10, 10),    "glow": (255, 80, 0),  "hp_mult": 2.5, "dmg_mult": 2.2, "spd_mult": 1.15,"size_add": 8},
+    {"name": "Inferno Drake", "color": (20, 10, 10),    "glow": (255, 80, 0),  "hp_mult": 2.5, "dmg_mult": 1.8, "spd_mult": 1.15,"size_add": 8},
 ]
 # hp/dmg/spd are BASE values at level 1. Scale formula applied on top.
 BOSS_TYPES = [
@@ -794,7 +832,7 @@ BOSS_TYPES = [
         "color":   (180, 20, 20),
         "size":    46,
         "base_hp": 1650,
-        "base_dmg": 28,
+        "base_dmg": 18,
         "base_spd": 1.1,
         "gold":    400,
         "xp":      600,
@@ -807,7 +845,7 @@ BOSS_TYPES = [
         "color":   (140, 0, 200),
         "size":    40,
         "base_hp": 2200,
-        "base_dmg": 35,
+        "base_dmg": 17,
         "base_spd": 0.9,
         "gold":    380,
         "xp":      580,
@@ -820,7 +858,7 @@ BOSS_TYPES = [
         "color":   (80, 130, 80),
         "size":    52,
         "base_hp": 2450,
-        "base_dmg": 22,
+        "base_dmg": 16,
         "base_spd": 0.65,
         "gold":    500,
         "xp":      700,
@@ -833,7 +871,7 @@ BOSS_TYPES = [
         "color":   (220, 180, 30),
         "size":    44,
         "base_hp": 1400,
-        "base_dmg": 40,
+        "base_dmg": 16,
         "base_spd": 1.3,
         "gold":    420,
         "xp":      650,
@@ -846,7 +884,7 @@ BOSS_TYPES = [
         "color":   (20, 20, 60),
         "size":    50,
         "base_hp": 2050,
-        "base_dmg": 50,
+        "base_dmg": 18,
         "base_spd": 0.75,
         "gold":    550,
         "xp":      800,
@@ -1120,7 +1158,7 @@ class Player:
         self.x = float(x); self.y = float(y)
         self.username       = username
         self.size           = 18
-        self.speed          = 3.5
+        self.speed          = 4.0
         self.level          = 1
         self.xp             = 0
         self.xp_to_next     = 100
@@ -1298,9 +1336,7 @@ class Player:
             "rapid":             0.28,
             "corrupted_homing":  0.55,
         }.get(beh, 0.5)
-        # corrupted_homing has its own sound file; falls back to homing if missing
-        _sfx_key = beh if beh == "corrupted_homing" else beh
-        SOUNDS.play(f"shoot_{_sfx_key}", volume_scale=_sfx_scale)
+        SOUNDS.play(f"shoot_{beh}", volume_scale=_sfx_scale)
 
     def _dash_cd(self):
         """Effective cooldown per charge, reduced by dash perk stacks."""
@@ -1468,6 +1504,53 @@ class Player:
                         drx = sx + int(math.cos(a) * ring_r)
                         dry = sy + int(math.sin(a) * ring_r * 0.38)
                         pygame.draw.circle(surf, disc_col, (drx, dry), max(1, 3 - ring_idx))
+            elif pat == "hexweaver":
+                # Keep orbiting projectiles during hurt
+                spin1 = t * 0.055
+                spin2 = t * -0.038
+                orb_r1 = self.size + 22
+                for oi in range(6):
+                    a   = spin1 + (math.pi * 2 / 6) * oi
+                    ox2 = sx + int(math.cos(a) * orb_r1)
+                    oy2 = sy + int(math.sin(a) * orb_r1)
+                    pygame.draw.circle(surf, (200, 80, 255), (ox2, oy2), 5)
+                    pygame.draw.circle(surf, WHITE, (ox2, oy2), 2)
+                orb_r2 = self.size + 10
+                for oi in range(3):
+                    a   = spin2 + (math.pi * 2 / 3) * oi
+                    ox2 = sx + int(math.cos(a) * orb_r2)
+                    oy2 = sy + int(math.sin(a) * orb_r2)
+                    pygame.draw.circle(surf, (160, 0, 220), (ox2, oy2), 3)
+            elif pat == "lavalord":
+                # Keep orbit ring and cracks visible during hurt
+                spin_a = t * 0.04
+                orb_r  = self.size + 14
+                orb_r2 = int(orb_r * 0.4)
+                for di in range(24):
+                    a   = spin_a + (math.pi * 2 / 24) * di
+                    drx = sx + int(math.cos(a) * orb_r)
+                    dry = sy + int(math.sin(a) * orb_r2)
+                    pygame.draw.circle(surf, (255, 140, 20), (drx, dry), 2)
+            elif pat == "ironhide":
+                # Keep spinning lantern embers and pauldrons visible during hurt — orb flashes white
+                spin_outer = t * 0.030
+                spin_inner = t * -0.048
+                orb_r_out  = self.size + 20
+                orb_r_in   = self.size + 12
+                for oi in range(6):
+                    a   = spin_outer + (math.pi * 2 / 6) * oi
+                    ex2 = sx + int(math.cos(a) * orb_r_out)
+                    ey2 = sy + int(math.sin(a) * orb_r_out)
+                    pygame.draw.circle(surf, (220, 110, 0), (ex2, ey2), 3)
+                for oi in range(4):
+                    a   = spin_inner + (math.pi * 2 / 4) * oi
+                    ix2 = sx + int(math.cos(a) * orb_r_in)
+                    iy2 = sy + int(math.sin(a) * orb_r_in)
+                    pygame.draw.circle(surf, (180, 80, 0), (ix2, iy2), 2)
+                for side in (-1, 1):
+                    px2 = sx + side * int(self.size * 0.82)
+                    pygame.draw.circle(surf, (48, 55, 62), (px2, sy - 3), int(self.size * 0.38))
+                    pygame.draw.circle(surf, (75, 85, 96), (px2, sy - 3), int(self.size * 0.38), 2)
             pygame.draw.circle(surf, WHITE, (sx, sy), self.size)
         elif pat == "default":
             pygame.draw.circle(surf, CYAN, (sx, sy), self.size)
@@ -1553,7 +1636,6 @@ class Player:
                             ex_b = bx + int(math.cos(perp) * barb_len * bsign)
                             ey_b = by + int(math.sin(perp) * barb_len * bsign)
                             barb_alpha = int(140 * (1 - frac))
-                            bs2 = pygame.Surface((abs(ex_b - bx) + 2, abs(ey_b - by) + 2), pygame.SRCALPHA)
                             pygame.draw.line(surf, (200, 180, 255, barb_alpha),
                                              (bx, by), (ex_b, ey_b), 1)
 
@@ -1615,6 +1697,187 @@ class Player:
                                (sx, sy), self.size, 2)
             pygame.draw.circle(surf, lerp_color((80, 0, 160), (200, 80, 255), np_bh),
                                (sx, sy), int(self.size * 0.82), 1)
+
+        elif pat == "hexweaver":
+            # ── Hex Weaver — orbiting chaos projectiles + pulsing hex body ─────
+            t_hx  = self._cosm_tick
+            pulse = math.sin(t_hx * 0.07) * 0.5 + 0.5
+            spin1 = t_hx * 0.055    # outer ring — clockwise
+            spin2 = t_hx * -0.038   # inner ring — counter-clockwise
+
+            # Outer ring: 6 orbiting "projectile" blobs
+            orb_r1 = self.size + 22
+            for oi in range(6):
+                a    = spin1 + (math.pi * 2 / 6) * oi
+                ox2  = sx + int(math.cos(a) * orb_r1)
+                oy2  = sy + int(math.sin(a) * orb_r1)
+                # Trailing tail (2 ghost dots behind each)
+                for ghost in range(1, 3):
+                    ga   = a - ghost * 0.22
+                    gx2  = sx + int(math.cos(ga) * orb_r1)
+                    gy2  = sy + int(math.sin(ga) * orb_r1)
+                    gc   = lerp_color((180, 0, 255), (80, 0, 140), ghost * 0.5)
+                    pygame.draw.circle(surf, gc, (gx2, gy2), max(1, 4 - ghost))
+                # Main orb blob
+                orb_col = lerp_color((200, 80, 255), (255, 120, 255), pulse)
+                pygame.draw.circle(surf, orb_col, (ox2, oy2), 5)
+                pygame.draw.circle(surf, WHITE, (ox2, oy2), 2)
+
+            # Inner ring: 3 smaller spinning hex dots
+            orb_r2 = self.size + 10
+            for oi in range(3):
+                a    = spin2 + (math.pi * 2 / 3) * oi
+                ox2  = sx + int(math.cos(a) * orb_r2)
+                oy2  = sy + int(math.sin(a) * orb_r2)
+                ic   = lerp_color((140, 0, 220), (220, 60, 255), pulse)
+                pygame.draw.circle(surf, ic, (ox2, oy2), 3)
+
+            # Body — pulsing purple/magenta with hex pattern
+            body_col = lerp_color((80, 0, 160), (140, 0, 200), pulse)
+            pygame.draw.circle(surf, body_col, (sx, sy), self.size)
+            # 6-point hex outline on body
+            for hi in range(6):
+                ha  = (math.pi / 3) * hi + spin1 * 0.2
+                hx2 = sx + int(math.cos(ha) * (self.size - 3))
+                hy2 = sy + int(math.sin(ha) * (self.size - 3))
+                pygame.draw.circle(surf, lerp_color((200, 60, 255), (255, 160, 255), pulse), (hx2, hy2), 2)
+            # Pulsing inner glow ring
+            ir = max(3, int(self.size * 0.55 + math.sin(t_hx * 0.09) * 3))
+            pygame.draw.circle(surf, lerp_color((180, 0, 255), (255, 80, 255), pulse), (sx, sy), ir, 2)
+
+        elif pat == "lavalord":
+            # ── Lava Lord — lava cracks on body + spinning pulsing orbit line ──
+            t_ll   = self._cosm_tick
+            lp     = math.sin(t_ll * 0.06) * 0.5 + 0.5
+            spin_a = t_ll * 0.04
+
+            # Spinning elliptical orbit ring (drawn first, behind body)
+            orb_r  = self.size + 14
+            orb_r2 = int(orb_r * 0.4)   # squashed vertical radius
+            ring_pulse = math.sin(t_ll * 0.1) * 0.5 + 0.5
+            ring_w = max(1, int(2 + ring_pulse * 2))
+            ring_col = lerp_color((200, 60, 0), (255, 200, 40), ring_pulse)
+            # Draw orbit as a series of dots forming an ellipse
+            for di in range(24):
+                a   = spin_a + (math.pi * 2 / 24) * di
+                drx = sx + int(math.cos(a) * orb_r)
+                dry = sy + int(math.sin(a) * orb_r2)
+                dr  = max(1, ring_w if di % 3 != 0 else ring_w + 1)
+                bright = 1.0 if di % 6 == 0 else 0.5
+                dc  = lerp_color(ring_col, WHITE, bright * 0.4)
+                pygame.draw.circle(surf, dc, (drx, dry), dr)
+
+            # Outer heat glow rings (concentric, no surface alloc)
+            glow_r = self.size + 8 + int(lp * 5)
+            for gi in range(3):
+                gr = glow_r - gi * 3
+                if gr > self.size:
+                    gc2 = (max(0, min(255, int(160 + lp * 60 - gi * 30))),
+                           max(0, min(255, int(40 + lp * 30 - gi * 10))), 0)
+                    pygame.draw.circle(surf, gc2, (sx, sy), gr, 2)
+
+            # Dark crust body
+            crust = lerp_color((50, 12, 0), (90, 22, 0), lp)
+            pygame.draw.circle(surf, crust, (sx, sy), self.size)
+
+            # Lava crack lines
+            for ci in range(6):
+                crack_a   = spin_a * 0.3 + ci * (math.pi / 3)
+                crack_len = int(self.size * 0.72 + math.sin(t_ll * 0.05 + ci) * self.size * 0.18)
+                cx1 = sx + int(math.cos(crack_a) * 3)
+                cy1 = sy + int(math.sin(crack_a) * 3)
+                cx2 = sx + int(math.cos(crack_a) * crack_len)
+                cy2 = sy + int(math.sin(crack_a) * crack_len)
+                cc  = lerp_color((210, 70, 0), (255, 210, 40), lp)
+                pygame.draw.line(surf, cc, (cx1, cy1), (cx2, cy2), 2)
+
+            # Molten core
+            core_r   = int(self.size * 0.42 + lp * self.size * 0.12)
+            core_col = lerp_color((255, 120, 0), (255, 240, 80), lp)
+            pygame.draw.circle(surf, core_col, (sx, sy), core_r)
+
+        elif pat == "ironhide":
+            # ── Ironhide — Gorvak-style plate armour + warm lantern glow ─────────
+            t_ih  = self._cosm_tick
+            pulse = math.sin(t_ih * 0.045) * 0.5 + 0.5   # slow amber pulse
+
+            # ── Lantern orbit — spinning amber embers drawn behind everything ──────
+            # Outer ring: 6 embers rotating clockwise, each leaving a 3-dot tail
+            spin_outer = t_ih * 0.030          # clockwise
+            spin_inner = t_ih * -0.048         # counter-clockwise
+            orb_r_out  = self.size + 20
+            orb_r_in   = self.size + 12
+            for oi in range(6):
+                a = spin_outer + (math.pi * 2 / 6) * oi
+                # Ghost tail (3 dots fading behind each ember)
+                for ghost in range(1, 4):
+                    ga  = a - ghost * 0.18
+                    gx2 = sx + int(math.cos(ga) * orb_r_out)
+                    gy2 = sy + int(math.sin(ga) * orb_r_out)
+                    fade = max(0, int(pulse * 80) - ghost * 22)
+                    if fade > 8:
+                        pygame.draw.circle(surf, (min(255, 140 + fade), min(255, fade // 2), 0),
+                                           (gx2, gy2), max(1, 3 - ghost))
+                # Main ember dot — brightness breathes with pulse
+                ex2 = sx + int(math.cos(a) * orb_r_out)
+                ey2 = sy + int(math.sin(a) * orb_r_out)
+                ec  = (min(255, 200 + int(pulse * 55)),
+                       min(255, 100 + int(pulse * 40)),
+                       max(0,   int(pulse * 10)))
+                pygame.draw.circle(surf, ec, (ex2, ey2), max(2, 3 + int(pulse)))
+            # Inner ring: 4 smaller embers counter-rotating, no tails
+            for oi in range(4):
+                a   = spin_inner + (math.pi * 2 / 4) * oi
+                ix2 = sx + int(math.cos(a) * orb_r_in)
+                iy2 = sy + int(math.sin(a) * orb_r_in)
+                ic  = (min(255, 170 + int(pulse * 40)),
+                       min(255, 80  + int(pulse * 30)), 0)
+                pygame.draw.circle(surf, ic, (ix2, iy2), 2)
+
+            # ── Pauldrons (shoulder guards) — draw behind the body ───────────────
+            for side in (-1, 1):
+                px2 = sx + side * int(self.size * 0.82)
+                pygame.draw.circle(surf, (48, 55, 62), (px2, sy - 3), int(self.size * 0.38))
+                pygame.draw.circle(surf, (75, 85, 96), (px2, sy - 3), int(self.size * 0.38), 2)
+                # Three rivets on each pauldron
+                for ri in range(3):
+                    ra  = (ri - 1) * 0.35 * side
+                    rrx = px2 + int(math.cos(ra) * int(self.size * 0.20))
+                    rry = sy - 3 + int(math.sin(ra) * int(self.size * 0.20))
+                    pygame.draw.circle(surf, (100, 112, 124), (rrx, rry), 2)
+
+            # ── Chestplate body ───────────────────────────────────────────────────
+            pygame.draw.circle(surf, (50, 58, 66), (sx, sy), int(self.size * 0.92))
+            # Vertical chest ridge
+            pygame.draw.line(surf, (88, 100, 112),
+                             (sx, sy - int(self.size * 0.70)),
+                             (sx, sy + int(self.size * 0.60)), 2)
+            # Horizontal belt line
+            pygame.draw.line(surf, (68, 78, 88),
+                             (sx - int(self.size * 0.68), sy + int(self.size * 0.20)),
+                             (sx + int(self.size * 0.68), sy + int(self.size * 0.20)), 2)
+
+            # ── Helmet arc ───────────────────────────────────────────────────────
+            helm_r = int(self.size * 0.62)
+            pygame.draw.arc(surf, (62, 72, 82),
+                            (sx - helm_r, sy - helm_r, helm_r * 2, helm_r * 2),
+                            math.pi * 0.10, math.pi * 0.90, int(self.size * 0.20))
+
+            # ── Visor slit — glows green, dims to amber when hurt ─────────────────
+            visor_y   = sy - int(self.size * 0.28)
+            visor_col = lerp_color((80, 180, 80), (200, 140, 30), pulse * 0.25)
+            pygame.draw.rect(surf, visor_col,
+                             (sx - int(self.size * 0.30), visor_y - 2,
+                              int(self.size * 0.60), 5),
+                             border_radius=2)
+            # Glowing eye dots through the visor
+            for ex_off in (-int(self.size * 0.13), int(self.size * 0.13)):
+                pygame.draw.circle(surf, visor_col, (sx + ex_off, visor_y), 2)
+
+            # ── Pulsing steel rim ─────────────────────────────────────────────────
+            rim_col = lerp_color((78, 88, 100), (120, 138, 155), pulse)
+            pygame.draw.circle(surf, rim_col, (sx, sy), self.size, 3)
+
         else:
             pygame.draw.circle(surf, CYAN, (sx, sy), self.size)
 
@@ -2222,8 +2485,11 @@ class HomingProjectile(Projectile):
             tx /= mag; ty /= mag
             cmag = math.hypot(self.vx, self.vy) or 1
             cx   = self.vx / cmag; cy = self.vy / cmag
-            self.vx = (cx + tx * self.turn_rate) / math.hypot(cx + tx * self.turn_rate, cy + ty * self.turn_rate) * cmag
-            self.vy = (cy + ty * self.turn_rate) / math.hypot(cx + tx * self.turn_rate, cy + ty * self.turn_rate) * cmag
+            nx   = cx + tx * self.turn_rate
+            ny   = cy + ty * self.turn_rate
+            nm   = math.hypot(nx, ny) or 1
+            self.vx = nx / nm * cmag
+            self.vy = ny / nm * cmag
         self.x    += self.vx
         self.y    += self.vy
         self.dist += math.hypot(self.vx, self.vy)
@@ -2301,8 +2567,12 @@ class Boss:
         self.nyx_pulse_t    = 0                          # visual pulse timer
 
         # Malachar lava/fire state
-        self.mal_fire_particles = []   # visual-only fire sparks [x, y, vx, vy, life, max_life, size]
-        self.mal_pulse_t        = 0    # lava texture pulse timer
+        self.mal_fire_particles     = []   # visual-only fire sparks [x, y, vx, vy, life, max_life, size]
+        self.mal_pulse_t            = 0    # lava texture pulse timer
+        self.mal_spin_timer         = 0    # > 0 while spin attack is playing
+        self.mal_spin_ang           = 0.0  # current spin angle
+        self.mal_last_spin_pct      = 5    # tracks last 20% threshold crossed (starts at 5 so first trigger is at 80%)
+        self._trigger_mal_spin      = False  # consumed by game loop for SFX
 
     @property
     def dmg(self):
@@ -2323,13 +2593,21 @@ class Boss:
                 and self.hp / self.max_hp <= 0.5 and self.alive):
             self.vex_split_done = True
             self._trigger_vex_split = True   # flag picked up by game loop
+        # Malachar: spin attack every time HP crosses a new 10% threshold downward
+        if self.pattern == "charge" and self.alive and self.mal_spin_timer == 0:
+            cur_pct = int(self.hp / self.max_hp * 5)   # 4→0 as HP drops (triggers at 80%, 60%, 40%, 20%)
+            if cur_pct < self.mal_last_spin_pct:
+                self.mal_last_spin_pct = cur_pct
+                self.mal_spin_timer    = 60
+                self.mal_spin_ang      = 0.0
+                self._trigger_mal_spin = True
 
-    def _fire(self, projectiles, dx, dy, dmg_mult=1.0, size=None, spd=0.12):
+    def _fire(self, projectiles, dx, dy, dmg_mult=1.0, size=None, spd=0.12, rng=500):
         mag = math.hypot(dx, dy) or 1
         dx /= mag; dy /= mag
         projectiles.append(
             Projectile(self.x, self.y, dx, dy,
-                       int(self.dmg * dmg_mult), spd, 500,
+                       int(self.dmg * dmg_mult), spd, rng,
                        self.proj_col, size or 10, owner="enemy"))
 
     def update(self, player, projectiles, world_bounds):
@@ -2351,6 +2629,24 @@ class Boss:
 
         # ── Pattern: charge ────────────────────────────────────────────────────
         if self.pattern == "charge":
+            # ── Spin attack (triggered at each 20% HP threshold) ──────────────
+            if self.mal_spin_timer > 0:
+                self.mal_spin_timer -= 1
+                if self.mal_spin_timer % 4 == 0:
+                    bullet_count = 8 if self.enraged else 6
+                    steps        = 60 // 4
+                    step_idx     = (60 - self.mal_spin_timer) // 4
+                    self.mal_spin_ang = (step_idx / steps) * math.pi * 2
+                    for bi in range(bullet_count):
+                        a = self.mal_spin_ang + (math.pi * 2 / bullet_count) * bi
+                        spd_s = 0.28 if self.enraged else 0.22
+                        projectiles.append(
+                            Projectile(self.x, self.y,
+                                       math.cos(a), math.sin(a),
+                                       int(self.dmg * 0.8), spd_s, 900,
+                                       (255, 120, 30), 11, owner="enemy"))
+                return
+
             if self.charge_timer > 0:
                 self.x += self.charge_vx
                 self.y += self.charge_vy
@@ -2519,13 +2815,13 @@ class Boss:
                 for off in (-0.28, 0, 0.28):
                     ang = math.atan2(dy, dx) + off
                     self._fire(projectiles, math.cos(ang), math.sin(ang),
-                               size=10, spd=0.20)
+                               size=10, spd=0.20, rng=1400)
                 if self.enraged:
                     # Enraged: 5-way fan
                     for off in (-0.5, -0.25, 0.25, 0.5):
                         ang = math.atan2(dy, dx) + off
                         self._fire(projectiles, math.cos(ang), math.sin(ang),
-                                   size=9, spd=0.20)
+                                   size=9, spd=0.20, rng=1400)
 
         # ── Pattern: homing ───────────────────────────────────────────────────
         elif self.pattern == "homing":
@@ -2764,9 +3060,63 @@ class Boss:
         if not _skip_standard_body:
             pygame.draw.circle(surf, body_col, (sx, sy), self.size)
 
-        # ── Seraphix wings ────────────────────────────────────────────────────
+        # ── Gorvak Ironhide knight armour ─────────────────────────────────────
+        if self.pattern == "burst":
+            t_g   = pygame.time.get_ticks()
+            pulse = math.sin(t_g * 0.004) * 0.5 + 0.5
+            sz    = self.size
+
+            # Armour glow — enraged turns it red/orange
+            if self.enraged:
+                aura_c = lerp_color((120, 20, 0), (200, 60, 0), pulse)
+            else:
+                aura_c = lerp_color((40, 50, 60), (70, 80, 90), pulse)
+            for ai in range(3):
+                ar = sz + 6 + ai * 5
+                pygame.draw.circle(surf, aura_c, (sx, sy), ar, 2)
+
+            # Pauldrons (shoulder guards) — two arcs left/right
+            for side in (-1, 1):
+                px3 = sx + side * int(sz * 0.82)
+                pygame.draw.circle(surf, (55, 62, 70), (px3, sy - 4), int(sz * 0.38))
+                pygame.draw.circle(surf, (80, 90, 100), (px3, sy - 4), int(sz * 0.38), 2)
+                # Rivets on shoulder
+                for ri in range(3):
+                    ra  = (ri - 1) * 0.35 * side
+                    rrx = px3 + int(math.cos(ra) * int(sz * 0.22))
+                    rry = sy - 4 + int(math.sin(ra) * int(sz * 0.22))
+                    pygame.draw.circle(surf, (100, 110, 120), (rrx, rry), 2)
+
+            # Chestplate body — darker steel over the base circle
+            pygame.draw.circle(surf, (50, 58, 66), (sx, sy), int(sz * 0.88))
+            # Vertical chest ridge
+            pygame.draw.line(surf, (90, 100, 112), (sx, sy - int(sz * 0.7)), (sx, sy + int(sz * 0.6)), 3)
+            # Horizontal belt line
+            pygame.draw.line(surf, (70, 78, 88), (sx - int(sz * 0.7), sy + int(sz * 0.2)),
+                             (sx + int(sz * 0.7), sy + int(sz * 0.2)), 2)
+
+            # Helmet visor — top of body
+            helm_r = int(sz * 0.62)
+            pygame.draw.arc(surf, (65, 74, 84),
+                            (sx - helm_r, sy - helm_r, helm_r * 2, helm_r * 2),
+                            math.pi * 0.1, math.pi * 0.9, int(sz * 0.22))
+            # Visor slit
+            visor_y = sy - int(sz * 0.28)
+            visor_col = (255, 80, 20) if self.enraged else (80, 180, 80)
+            pygame.draw.rect(surf, visor_col,
+                             (sx - int(sz * 0.32), visor_y - 3, int(sz * 0.64), 6),
+                             border_radius=3)
+            # Glowing eyes through visor
+            for ex2_off in (-int(sz * 0.14), int(sz * 0.14)):
+                pygame.draw.circle(surf, visor_col, (sx + ex2_off, visor_y), 3)
+
+            # Steel rim around body
+            rim_col = lerp_color((80, 90, 100), (130, 145, 160), pulse)
+            pygame.draw.circle(surf, rim_col, (sx, sy), sz, 3)
+
+        # ── Seraphix wings (continued) ────────────────────────────────────────
         if self.pattern == "orbit":
-            t = pygame.time.get_ticks() // 16   # ~60fps equivalent tick
+            t = pygame.time.get_ticks() // 16
             flap      = math.sin(t * 0.08)
             flap_ang  = flap * 0.22
             glow_tick = math.sin(t * 0.12) * 0.5 + 0.5
@@ -2966,7 +3316,12 @@ class GorvakMinion:
         self.boss   = boss   # reference for teleport anchor
         self.alive  = True
         self.hurt_flash  = 0
-        self.shoot_cd    = random.randint(30, 70)
+        # Enraged-phase spawns get a longer initial delay so they don't immediately
+        # fire the moment they appear next to the player
+        if boss.enraged:
+            self.shoot_cd = random.randint(90, 140)
+        else:
+            self.shoot_cd = random.randint(30, 70)
         self.teleport_cd = random.randint(80, 150)
         # Blink flash (visual telegraph before teleport)
         self.blink_flash  = 0
@@ -3015,6 +3370,10 @@ class GorvakMinion:
                 self.teleport_cd = random.randint(
                     60 if self.boss.enraged else 90,
                     120 if self.boss.enraged else 160)
+                # After an enraged teleport (which lands near the player) give a
+                # brief shoot delay so the arrival isn't an instant hit
+                if self.boss.enraged:
+                    self.shoot_cd = max(self.shoot_cd, random.randint(50, 75))
         else:
             if self.teleport_cd > 0:
                 self.teleport_cd -= 1
@@ -3031,30 +3390,60 @@ class GorvakMinion:
         if not self.alive:
             return
         sx = int(self.x - cam[0]); sy = int(self.y - cam[1])
+        sz = self.SIZE
 
         # Telegraph blink before teleport
         if self.blink_flash > 0:
             t = self.blink_flash / self.BLINK_WARNING
-            alpha = int(180 * t)
-            warn_r = self.SIZE + 10 + int((1 - t) * 20)
-            ws = pygame.Surface((warn_r * 2 + 4, warn_r * 2 + 4), pygame.SRCALPHA)
-            pygame.draw.circle(ws, (150, 255, 150, alpha),
-                               (warn_r + 2, warn_r + 2), warn_r, 2)
-            surf.blit(ws, (sx - warn_r - 2, sy - warn_r - 2))
+            warn_r = sz + 10 + int((1 - t) * 20)
+            # Iron-grey warning ring
+            warn_col = (max(0, min(255, int(140 * t))),
+                        max(0, min(255, int(160 * t))),
+                        max(0, min(255, int(180 * t))))
+            pygame.draw.circle(surf, warn_col, (sx, sy), warn_r, 2)
 
         # Shadow
-        pygame.draw.ellipse(surf, (10, 10, 20),
-                            (sx - self.SIZE, sy + self.SIZE - 4, self.SIZE * 2, 8))
-        # Body — flash white on hurt
-        col = WHITE if self.hurt_flash % 4 < 2 and self.hurt_flash > 0 else self.COLOR
-        pygame.draw.circle(surf, col,   (sx, sy), self.SIZE)
-        pygame.draw.circle(surf, WHITE, (sx, sy), self.SIZE, 2)
-        # Inner rune dot
-        pygame.draw.circle(surf, (180, 255, 180), (sx, sy), self.SIZE // 2)
+        pygame.draw.ellipse(surf, (8, 6, 5),
+                            (sx - sz, sy + sz - 4, sz * 2, 8))
+
+        hurt = self.hurt_flash % 4 < 2 and self.hurt_flash > 0
+        if hurt:
+            pygame.draw.circle(surf, WHITE, (sx, sy), sz)
+            pygame.draw.circle(surf, WHITE, (sx, sy), sz, 2)
+        else:
+            # Mini knight armour
+            # Body plate
+            pygame.draw.circle(surf, (48, 55, 62), (sx, sy), sz)
+
+            # Mini pauldrons
+            for side in (-1, 1):
+                mpx = sx + side * int(sz * 0.8)
+                pygame.draw.circle(surf, (55, 62, 70), (mpx, sy - 2), int(sz * 0.35))
+                pygame.draw.circle(surf, (75, 85, 95), (mpx, sy - 2), int(sz * 0.35), 1)
+
+            # Chest ridge
+            pygame.draw.line(surf, (85, 95, 108), (sx, sy - int(sz * 0.7)), (sx, sy + int(sz * 0.55)), 2)
+
+            # Mini helmet top arc
+            hm_r = int(sz * 0.6)
+            pygame.draw.arc(surf, (62, 70, 80),
+                            (sx - hm_r, sy - hm_r, hm_r * 2, hm_r * 2),
+                            math.pi * 0.15, math.pi * 0.85, int(sz * 0.22))
+
+            # Visor glow — green normally, red if boss enraged
+            visor_col = (220, 60, 10) if self.boss.enraged else (60, 200, 80)
+            visor_y   = sy - int(sz * 0.25)
+            pygame.draw.rect(surf, visor_col,
+                             (sx - int(sz * 0.3), visor_y - 2, int(sz * 0.6), 4),
+                             border_radius=2)
+
+            # Steel rim
+            pygame.draw.circle(surf, (80, 90, 102), (sx, sy), sz, 2)
+
         # HP bar
-        bw = self.SIZE * 2 + 8
-        draw_bar(surf, sx - bw // 2, sy - self.SIZE - 10, bw, 5,
-                 self.hp, self.max_hp, (80, 220, 80))
+        bw = sz * 2 + 8
+        draw_bar(surf, sx - bw // 2, sy - sz - 10, bw, 4,
+                 self.hp, self.max_hp, (80, 200, 80))
 
 
 # ── Boss Intro Cinematic ──────────────────────────────────────────────────────
@@ -3114,11 +3503,6 @@ class BossIntro:
         self._card_ch   = ch
         self._name_s    = name_s
         self._title_s   = title_s
-        # Pre-render opaque card background once — we'll set_alpha on the whole card
-        self._card_bg   = pygame.Surface((cw, ch), pygame.SRCALPHA)
-        self._card_bg.fill((0, 0, 0, 200))
-        pygame.draw.rect(self._card_bg, (*boss.color, 220),
-                         (0, 0, cw, ch), 3, border_radius=12)
 
     def update(self):
         self.frame += 1
@@ -3248,11 +3632,10 @@ class BossIntro:
         card_y   = int(SH // 2 - 80 + (1 - slam_t) * (-160))
         alpha    = min(255, card_age * 20)
         cw, ch   = self._card_cw, self._card_ch
-        # Blit pre-rendered card background then set alpha
-        self._card.fill((0, 0, 0, 0))
-        tmp_bg = self._card_bg.copy()
-        tmp_bg.set_alpha(alpha)
-        self._card.blit(tmp_bg, (0, 0))
+        # Refill cached card surface directly — no copy needed
+        self._card.fill((0, 0, 0, min(200, alpha)))
+        pygame.draw.rect(self._card, (*self.boss.color, min(220, alpha)),
+                         (0, 0, cw, ch), 3, border_radius=12)
         surf.blit(self._card, (SW // 2 - cw // 2, card_y))
         self._name_s.set_alpha(alpha)
         self._title_s.set_alpha(alpha)
@@ -3309,17 +3692,76 @@ def _draw_cosmetic_preview(surf, pattern, preview_col, cx, cy, r):
                 pygame.draw.line(surf, (100, 60, 180), (root_x, cy), (tip_x, tip_y), 3)
                 pygame.draw.line(surf, (210, 185, 255), (root_x, cy), (tip_x, tip_y), 1)
     elif pattern == "blackhole":
-        # Outer accretion disc dots
         for i in range(8):
             a   = (math.pi * 2 / 8) * i
             drx = cx + int(math.cos(a) * (r + 4))
             dry = cy + int(math.sin(a) * (r + 4) * 0.38)
             pygame.draw.circle(surf, (140, 40, 220), (drx, dry), 2)
-        # Black void
         pygame.draw.circle(surf, (0, 0, 0), (cx, cy), r)
-        # Gravitational lens ring
         pygame.draw.circle(surf, (100, 0, 180), (cx, cy), r, 2)
         pygame.draw.circle(surf, (180, 60, 255), (cx, cy), int(r * 0.82), 1)
+    elif pattern == "hexweaver":
+        # 6 orbiting projectile dots
+        for i in range(6):
+            a   = (math.pi * 2 / 6) * i
+            ox2 = cx + int(math.cos(a) * (r + 6))
+            oy2 = cy + int(math.sin(a) * (r + 6))
+            pygame.draw.circle(surf, (200, 80, 255), (ox2, oy2), 3)
+        pygame.draw.circle(surf, (80, 0, 160), (cx, cy), r)
+        # Hex outline dots
+        for i in range(6):
+            ha  = (math.pi / 3) * i
+            hx2 = cx + int(math.cos(ha) * (r - 3))
+            hy2 = cy + int(math.sin(ha) * (r - 3))
+            pygame.draw.circle(surf, (220, 80, 255), (hx2, hy2), 2)
+        pygame.draw.circle(surf, (180, 0, 255), (cx, cy), r // 2, 2)
+    elif pattern == "lavalord":
+        # Orbit ring as ellipse dots
+        orb_pr = r + 5
+        for i in range(12):
+            a   = (math.pi * 2 / 12) * i
+            drx = cx + int(math.cos(a) * orb_pr)
+            dry = cy + int(math.sin(a) * orb_pr * 0.42)
+            pygame.draw.circle(surf, (255, 140, 20), (drx, dry), 2)
+        pygame.draw.circle(surf, (50, 12, 0), (cx, cy), r)
+        # 6 crack lines
+        for i in range(6):
+            ca  = (math.pi / 3) * i
+            ex2 = cx + int(math.cos(ca) * (r - 2))
+            ey2 = cy + int(math.sin(ca) * (r - 2))
+            pygame.draw.line(surf, (255, 160, 20), (cx, cy), (ex2, ey2), 1)
+        pygame.draw.circle(surf, (255, 180, 40), (cx, cy), r // 3)
+    elif pattern == "ironhide":
+        # Steel armour plate body
+        pygame.draw.circle(surf, (48, 55, 62), (cx, cy), r)
+        # Mini pauldrons either side
+        for side in (-1, 1):
+            pygame.draw.circle(surf, (70, 80, 90),
+                               (cx + side * (r - 2), cy - 2), r // 3)
+            pygame.draw.circle(surf, (90, 102, 114),
+                               (cx + side * (r - 2), cy - 2), r // 3, 1)
+        # Chest ridge
+        pygame.draw.line(surf, (90, 102, 114),
+                         (cx, cy - r + 3), (cx, cy + r - 3), 1)
+        # Visor slit (green)
+        pygame.draw.rect(surf, (80, 180, 80),
+                         (cx - r // 2, cy - r // 3 - 1, r, 3),
+                         border_radius=1)
+        # Orbiting amber ember dots (outer ring × 6, inner ring × 4)
+        orb_r_out = r + 8
+        orb_r_in  = r + 4
+        for oi in range(6):
+            a   = (math.pi * 2 / 6) * oi
+            pygame.draw.circle(surf, (220, 120, 10),
+                               (cx + int(math.cos(a) * orb_r_out),
+                                cy + int(math.sin(a) * orb_r_out)), 2)
+        for oi in range(4):
+            a   = (math.pi * 2 / 4) * oi + math.pi / 4   # offset so they nestle between outer dots
+            pygame.draw.circle(surf, (180, 80, 0),
+                               (cx + int(math.cos(a) * orb_r_in),
+                                cy + int(math.sin(a) * orb_r_in)), 1)
+        # Steel rim
+        pygame.draw.circle(surf, (95, 108, 120), (cx, cy), r, 2)
     pygame.draw.circle(surf, WHITE, (cx, cy), r, 1)
 
 
@@ -3555,8 +3997,14 @@ class Shop:
             can_buy  = TOKENS.total >= cosm["cost"]
             req_seraph  = cosm.get("req_seraphix_kills", 0)
             req_nyx     = cosm.get("req_nyxoth_kills", 0)
+            req_vex     = cosm.get("req_vexara_kills", 0)
+            req_mal     = cosm.get("req_malachar_kills", 0)
+            req_gorv    = cosm.get("req_gorvak_kills", 0)
             meets_kills = (TOKENS.seraphix_kills >= req_seraph and
-                           TOKENS.nyxoth_kills   >= req_nyx)
+                           TOKENS.nyxoth_kills   >= req_nyx     and
+                           TOKENS.vexara_kills   >= req_vex     and
+                           TOKENS.malachar_kills >= req_mal     and
+                           TOKENS.gorvak_kills   >= req_gorv)
             cursor   = (global_i == self.selected if self.selected < 1000 else False)
 
             bg_col  = (40, 55, 40) if equipped else ((50, 45, 20) if cursor else (35, 35, 52))
@@ -3590,12 +4038,18 @@ class Shop:
                 draw_token_coin(surf, px + pw - 122, row_y + 18, 7)
                 surf.blit(fonts["med"].render(str(cosm["cost"]), True, cost_col),
                           (px + pw - 112, row_y + 10))
-                if (req_seraph > 0 or req_nyx > 0) and not meets_kills:
+                if (req_seraph > 0 or req_nyx > 0 or req_vex > 0 or req_mal > 0 or req_gorv > 0) and not meets_kills:
                     kills_col = (180, 120, 255)
                     if req_seraph > 0 and TOKENS.seraphix_kills < req_seraph:
                         hint_txt = f"Seraphix: {TOKENS.seraphix_kills}/{req_seraph}"
-                    else:
+                    elif req_nyx > 0 and TOKENS.nyxoth_kills < req_nyx:
                         hint_txt = f"Nyxoth: {TOKENS.nyxoth_kills}/{req_nyx}"
+                    elif req_vex > 0 and TOKENS.vexara_kills < req_vex:
+                        hint_txt = f"Vexara: {TOKENS.vexara_kills}/{req_vex}"
+                    elif req_gorv > 0 and TOKENS.gorvak_kills < req_gorv:
+                        hint_txt = f"Gorvak: {TOKENS.gorvak_kills}/{req_gorv}"
+                    else:
+                        hint_txt = f"Malachar: {TOKENS.malachar_kills}/{req_mal}"
                     surf.blit(fonts["tiny"].render(hint_txt, True, kills_col),
                               (px + pw - 112, row_y + 36))
                 elif can_buy and meets_kills:
@@ -3670,7 +4124,10 @@ class Shop:
             cosm  = items[self.selected]
             owned = cosm["id"] in player.owned_cosmetics
             meets_kills = (TOKENS.seraphix_kills >= cosm.get("req_seraphix_kills", 0) and
-                           TOKENS.nyxoth_kills   >= cosm.get("req_nyxoth_kills", 0))
+                           TOKENS.nyxoth_kills   >= cosm.get("req_nyxoth_kills", 0)   and
+                           TOKENS.vexara_kills   >= cosm.get("req_vexara_kills", 0)   and
+                           TOKENS.malachar_kills >= cosm.get("req_malachar_kills", 0) and
+                           TOKENS.gorvak_kills   >= cosm.get("req_gorvak_kills", 0))
             if key == pygame.K_b and not owned and meets_kills and TOKENS.spend(cosm["cost"]):
                 player.owned_cosmetics.add(cosm["id"])
                 player.active_cosmetic = cosm["id"]
@@ -3814,7 +4271,10 @@ class Shop:
                     cosm = next((c for c in COSMETICS if c["id"] == cosm_id), None)
                     meets_kills = (cosm and
                                    TOKENS.seraphix_kills >= cosm.get("req_seraphix_kills", 0) and
-                                   TOKENS.nyxoth_kills   >= cosm.get("req_nyxoth_kills", 0))
+                                   TOKENS.nyxoth_kills   >= cosm.get("req_nyxoth_kills", 0)   and
+                                   TOKENS.vexara_kills   >= cosm.get("req_vexara_kills", 0)   and
+                                   TOKENS.malachar_kills >= cosm.get("req_malachar_kills", 0) and
+                                   TOKENS.gorvak_kills   >= cosm.get("req_gorvak_kills", 0))
                     if cosm and not owned and meets_kills and TOKENS.spend(cosm["cost"]):
                         player.owned_cosmetics.add(cosm_id)
                         player.active_cosmetic = cosm_id
@@ -4728,11 +5188,11 @@ def username_screen(screen, clock, fonts):
 
                 controls = [
                     ("Movement",     "WASD  /  Arrow Keys"),
-                    ("Shoot",        "Left Mouse Button (aim with cursor)"),
-                    ("Dash",         "Space"),
+                    ("Shoot",        "Left Mouse Button  (aim with cursor)"),
+                    ("Dash",         "Space  —  2 charges, ~7s recharge each"),
                     ("Open Shop",    "TAB"),
-                    ("Pause",        "P or ESC"),
-                    ("Heal (Shop)",  "H in the shop (250g, +10 HP)"),
+                    ("Pause",        "P  or  ESC"),
+                    ("Heal (Shop)",  "H  in the shop  (250g, +10 HP)"),
                 ]
                 for ri, (label, value) in enumerate(controls):
                     ry = TY + 110 + ri * 46
@@ -4750,10 +5210,10 @@ def username_screen(screen, clock, fonts):
 
                 mechanics = [
                     ("Waves",       "Survive endless waves of enemies. Every 10th wave is a Boss wave."),
-                    ("Gold & Shop", "Enemies drop gold - buy new weapons in the shop with TAB."),
-                    ("Tokens",      "Defeat bosses to earn Tokens - spend them on cosmetics."),
+                    ("Gold & Shop", "Enemies drop gold — buy new weapons in the shop with TAB."),
+                    ("Tokens",      "Defeat bosses to earn Tokens — spend them on cosmetics."),
                     ("Perks",       "Every 5 waves pick 1 of 3 perk cards to boost your stats."),
-                    ("Corruption",  "Some waves are Corruption waves - harder enemies, better loot."),
+                    ("Corruption",  "Some waves are Corruption waves — harder enemies, better loot."),
                     ("Level Up",    "Kill enemies for XP. Higher level = more HP and damage."),
                 ]
                 for ri, (label, value) in enumerate(mechanics):
@@ -4799,7 +5259,7 @@ class Game:
     def __init__(self, username="Player"):
         self.screen   = pygame.display.set_mode((SW, SH))
         self._overlay = pygame.Surface((SW, SH), pygame.SRCALPHA)  # reused every frame
-        pygame.display.set_caption("Dungeon Crawler 37.0b9")
+        pygame.display.set_caption("Dungeon Crawler 40.1b3")
         self.clock    = pygame.time.Clock()
         self.world_w  = 3000; self.world_h = 3000
         self.username = username
@@ -4834,6 +5294,7 @@ class Game:
         self.pause_dev_input = ""    # password entry buffer
         self.pause_dev_prompt = False  # password prompt visible
         self.dev_boss_expand  = False  # True when boss-pick sub-menu is open
+        self.dev_perk_expand  = False  # True when perk-give sub-menu is open
         # Boss state
         self.boss           = None
         self.boss_clone     = None   # Vexara phase-2 clone
@@ -4868,7 +5329,48 @@ class Game:
         self.mal_lava_flows         = []      # world-space lava rivers [[pts], width, phase]
         self.mal_embers             = []      # floating ember particles [wx,wy,vx,vy,life,max_life]
         self.mal_ember_cd           = 0
+        # Seraphix arena visuals
+        self.sera_pillars           = []      # world-space pillar positions [wx, wy, height, glow_phase]
+        self.sera_motes             = []      # drifting divine light particles [wx,wy,vx,vy,life,max_life,size]
+        self.sera_mote_cd           = 0
+        # Gorvak dungeon arena visuals
+        self.gorv_lanterns          = []      # [wx, wy, flicker_phase, radius]
+        self.gorv_chains            = []      # [[(wx,wy),...], thickness]
         self.death_anim_timer       = 0       # > 0 while death animation plays
+
+        # ── Arena floor decorations (world-space, pre-generated once) ────────
+        rng = random.Random(42)   # fixed seed so decorations are stable across waves
+        # Worn scuff circles — faint rings on the floor
+        self.arena_scuffs = [
+            (rng.randint(80, self.world_w - 80),
+             rng.randint(80, self.world_h - 80),
+             rng.randint(18, 52),
+             rng.uniform(0.15, 0.40))   # radius, opacity scale
+            for _ in range(120)
+        ]
+        # Stone crack lines — short jagged marks
+        self.arena_cracks = []
+        for _ in range(80):
+            cx = rng.randint(60, self.world_w - 60)
+            cy = rng.randint(60, self.world_h - 60)
+            ang = rng.uniform(0, math.pi)
+            hlen = rng.randint(12, 50)
+            jag = rng.uniform(-0.5, 0.5)
+            mid = (cx + math.cos(ang + jag) * hlen * 0.5,
+                   cy + math.sin(ang + jag) * hlen * 0.5)
+            self.arena_cracks.append((
+                (cx, cy),
+                mid,
+                (cx + math.cos(ang) * hlen, cy + math.sin(ang) * hlen),
+                rng.uniform(0.12, 0.30)
+            ))
+        # Decorative mosaic tiles — slightly lighter square patches
+        self.arena_mosaic = [
+            (rng.randint(0, self.world_w // 128) * 128,
+             rng.randint(0, self.world_h // 128) * 128,
+             rng.choice([True, False]))
+            for _ in range(60)
+        ]
         self.death_particles        = []      # list of [x, y, vx, vy, life, max_life, col]
         # Spawn first handful
         for _ in range(min(4, self.wave_enemy_target)):
@@ -4927,14 +5429,55 @@ class Game:
                 fy  = random.randint(0, self.world_h)
                 pts = [(fx, fy)]
                 ang = random.uniform(0, math.pi * 2)
-                sl  = random.randint(180, 380)   # much longer segments
-                for _ in range(random.randint(12, 22)):   # more segments
-                    ang += random.uniform(-0.4, 0.4)      # gentler bends = longer reach
+                sl  = random.randint(180, 380)
+                for _ in range(random.randint(12, 22)):
+                    ang += random.uniform(-0.4, 0.4)
                     fx = max(0, min(self.world_w, fx + math.cos(ang) * sl))
                     fy = max(0, min(self.world_h, fy + math.sin(ang) * sl))
                     pts.append((fx, fy))
                 self.mal_lava_flows.append(
                     [pts, random.randint(10, 28), random.uniform(0, math.pi * 2)])
+
+        # Generate Seraphix Greek arena pillars
+        if bt["pattern"] == "orbit":
+            self.sera_motes   = []
+            self.sera_mote_cd = 0
+            cx = self.world_w // 2
+            cy = self.world_h // 2
+            self.sera_pillars = []
+            for ring_r, count in [(700, 12), (420, 8)]:
+                for i in range(count):
+                    ang = (math.pi * 2 / count) * i + (0.1 if ring_r < 500 else 0)
+                    px2 = cx + math.cos(ang) * ring_r
+                    py2 = cy + math.sin(ang) * ring_r
+                    self.sera_pillars.append(
+                        (px2, py2, random.randint(54, 72), random.uniform(0, math.pi * 2))
+                    )
+
+        # Generate Gorvak dungeon arena
+        if bt["pattern"] == "burst":
+            self.gorv_lanterns = []
+            self.gorv_chains   = []
+            # Lanterns scattered across the world
+            for _ in range(30):
+                self.gorv_lanterns.append((
+                    random.randint(80, self.world_w - 80),
+                    random.randint(80, self.world_h - 80),
+                    random.uniform(0, math.pi * 2),   # flicker phase
+                    random.randint(60, 120),           # light radius
+                ))
+            # Hanging chain clusters — short drooping segments
+            for _ in range(24):
+                cx2 = random.randint(60, self.world_w - 60)
+                cy2 = random.randint(60, self.world_h - 60)
+                pts = [(cx2, cy2)]
+                ang  = random.uniform(math.pi * 0.3, math.pi * 0.7)   # drooping downward
+                segs = random.randint(3, 6)
+                for _ in range(segs):
+                    cx2 += math.cos(ang + random.uniform(-0.3, 0.3)) * random.randint(12, 22)
+                    cy2 += math.sin(ang + random.uniform(-0.1, 0.1)) * random.randint(10, 18)
+                    pts.append((cx2, cy2))
+                self.gorv_chains.append([pts, random.randint(2, 4)])
 
     def _on_boss_killed(self):
         b = self.boss
@@ -4944,6 +5487,12 @@ class Game:
             TOKENS.record_seraphix_kill()
         if b.name == "Nyxoth the Abyssal":
             TOKENS.record_nyxoth_kill()
+        if b.name == "Vexara the Hex-Weaver":
+            TOKENS.record_vexara_kill()
+        if b.name == "Malachar the Undying":
+            TOKENS.record_malachar_kill()
+        if b.name == "Gorvak Ironhide":
+            TOKENS.record_gorvak_kill()
         self.floating_texts.append(
             FloatingText(b.x, b.y - 130, "+1 Token!", (255, 200, 60), 22))
         self.wave_active  = False
@@ -4955,6 +5504,10 @@ class Game:
         self.nyx_nebulas  = []
         self.mal_lava_flows = []
         self.mal_embers   = []
+        self.sera_pillars = []
+        self.sera_motes   = []
+        self.gorv_lanterns = []
+        self.gorv_chains   = []
         # Clear all lingering enemy projectiles so the player can't be hit after the kill
         self.projectiles = [p for p in self.projectiles if p.owner == "player"]
         self.fire_orbs   = []
@@ -5071,7 +5624,13 @@ class Game:
                       getattr(self.boss, 'pattern', None) == "homing")
         is_malachar = (self.boss_wave and self.boss and
                        getattr(self.boss, 'pattern', None) == "charge")
-        # Base background colour
+        is_seraphix = (self.boss_wave and self.boss and
+                       getattr(self.boss, 'pattern', None) == "orbit")
+        is_gorvak  = (self.boss_wave and self.boss and
+                      getattr(self.boss, 'pattern', None) == "burst")
+        is_normal  = not (is_vexara or is_nyxoth or is_malachar or is_seraphix or is_gorvak or self.elite_wave)
+
+        # ── Base fill ─────────────────────────────────────────────────────────
         if self.elite_wave:
             self.screen.fill((28, 16, 42))
         elif is_vexara:
@@ -5079,9 +5638,15 @@ class Game:
         elif is_nyxoth:
             self.screen.fill((0, 0, 0))
         elif is_malachar:
-            self.screen.fill((18, 6, 2))   # deep dark red-black base
+            self.screen.fill((18, 6, 2))
+        elif is_seraphix:
+            self.screen.fill((195, 185, 158))
+        elif is_gorvak:
+            self.screen.fill((38, 34, 30))    # dark warm grey dungeon stone
         else:
-            self.screen.fill((22, 22, 35))
+            self.screen.fill((18, 20, 28))   # deep slate base
+
+        # ── Tile grid (all modes except Malachar) ────────────────────────────
         if not is_malachar:
             tile = 64
             ox = cam[0] % tile; oy = cam[1] % tile
@@ -5091,14 +5656,189 @@ class Game:
                 tile_col = (24, 12, 44)
             elif is_nyxoth:
                 tile_col = (4, 4, 10)
-            else:
-                tile_col = (26, 26, 40)
-            for gx in range(-1, SW // tile + 2):
+            elif is_seraphix:
+                # Warm marble slabs — ivory / cream checkerboard
+                for gx in range(-1, SW // tile + 2):
+                    for gy in range(-1, SH // tile + 2):
+                        world_gx = (gx + (cam[0] // tile)) % 2
+                        world_gy = (gy + (cam[1] // tile)) % 2
+                        if (world_gx + world_gy) % 2 == 0:
+                            tc = (200, 190, 162)
+                        else:
+                            tc = (188, 178, 150)
+                        pygame.draw.rect(self.screen, tc,
+                                         (gx * tile - ox, gy * tile - oy, tile - 1, tile - 1))
+                # Golden grout lines
+                grout_col = (170, 148, 96)
+                for gx in range(-1, SW // tile + 2):
+                    pygame.draw.line(self.screen, grout_col,
+                                     (gx * tile - ox, 0), (gx * tile - ox, SH), 1)
                 for gy in range(-1, SH // tile + 2):
-                    pygame.draw.rect(self.screen, tile_col,
-                                     (gx * tile - ox, gy * tile - oy, tile - 1, tile - 1))
+                    pygame.draw.line(self.screen, grout_col,
+                                     (0, gy * tile - oy), (SW, gy * tile - oy), 1)
+            elif is_gorvak:
+                # Rough dungeon stone — 80px tiles with 4-shade variation
+                stone_tile = 80
+                sox = cam[0] % stone_tile; soy = cam[1] % stone_tile
+                for gx in range(-1, SW // stone_tile + 2):
+                    for gy in range(-1, SH // stone_tile + 2):
+                        world_gx = (gx + (cam[0] // stone_tile)) % 3
+                        world_gy = (gy + (cam[1] // stone_tile)) % 3
+                        shade = (world_gx * 3 + world_gy) % 4
+                        tc = [(42, 38, 33), (50, 44, 38), (36, 32, 28), (46, 40, 35)][shade]
+                        pygame.draw.rect(self.screen, tc,
+                                         (gx * stone_tile - sox, gy * stone_tile - soy,
+                                          stone_tile - 2, stone_tile - 2))
+            else:
+                # Two-tone stone slabs — alternating slightly lighter squares
+                for gx in range(-1, SW // tile + 2):
+                    for gy in range(-1, SH // tile + 2):
+                        world_gx = (gx + (cam[0] // tile)) % 2
+                        world_gy = (gy + (cam[1] // tile)) % 2
+                        if (world_gx + world_gy) % 2 == 0:
+                            tc = (24, 27, 36)
+                        else:
+                            tc = (27, 30, 40)
+                        pygame.draw.rect(self.screen, tc,
+                                         (gx * tile - ox, gy * tile - oy, tile - 1, tile - 1))
 
-        # Nyxoth: draw nebulas
+            if not is_normal and not is_seraphix and not is_gorvak:
+                # Elite / boss-specific tiles (solid colour)
+                if self.elite_wave: tc2 = (30, 18, 48)
+                elif is_vexara:     tc2 = (24, 12, 44)
+                else:               tc2 = (4, 4, 10)
+                for gx in range(-1, SW // tile + 2):
+                    for gy in range(-1, SH // tile + 2):
+                        pygame.draw.rect(self.screen, tc2,
+                                         (gx * tile - ox, gy * tile - oy, tile - 1, tile - 1))
+
+        # ── Normal arena floor details ────────────────────────────────────────
+        if is_normal:
+            # Mosaic accent tiles — slightly raised-looking patches
+            for mx, my, accent in self.arena_mosaic:
+                sx2 = int(mx - cam[0]); sy2 = int(my - cam[1])
+                if -130 < sx2 < SW + 130 and -130 < sy2 < SH + 130:
+                    mc = (30, 34, 46) if accent else (22, 25, 34)
+                    pygame.draw.rect(self.screen, mc, (sx2, sy2, 127, 127))
+
+            # Worn scuff rings — faint teal-grey circles on the stone
+            for wx, wy, wr, opac in self.arena_scuffs:
+                sx2 = int(wx - cam[0]); sy2 = int(wy - cam[1])
+                if -wr - 4 < sx2 < SW + wr + 4 and -wr - 4 < sy2 < SH + wr + 4:
+                    # Blend colour toward slightly lighter
+                    sc = (max(0, min(255, int(38 * opac + 18))),
+                          max(0, min(255, int(44 * opac + 20))),
+                          max(0, min(255, int(58 * opac + 28))))
+                    pygame.draw.circle(self.screen, sc, (sx2, sy2), wr, 1)
+
+            # Stone cracks — dark jagged line pairs
+            for p0, p1, p2, opac in self.arena_cracks:
+                s0 = (int(p0[0] - cam[0]), int(p0[1] - cam[1]))
+                s1 = (int(p1[0] - cam[0]), int(p1[1] - cam[1]))
+                s2 = (int(p2[0] - cam[0]), int(p2[1] - cam[1]))
+                if not (-60 < s0[0] < SW + 60 and -60 < s0[1] < SH + 60):
+                    continue
+                cc = (max(0, min(255, int(14 + opac * 20))),
+                      max(0, min(255, int(15 + opac * 22))),
+                      max(0, min(255, int(20 + opac * 28))))
+                pygame.draw.line(self.screen, cc, s0, s1, 1)
+                pygame.draw.line(self.screen, cc, s1, s2, 1)
+
+        # ── Seraphix: Greek arena floor + pillars ─────────────────────────────
+        if is_seraphix:
+            t_sera = pygame.time.get_ticks()
+            acx = int(self.world_w // 2 - cam[0])
+            acy = int(self.world_h // 2 - cam[1])
+
+            # Concentric floor mosaic rings radiating from arena centre
+            ring_cols = [(170, 148, 96), (185, 165, 118), (160, 138, 84)]
+            for ri, rr in enumerate([80, 160, 260, 380, 520, 680]):
+                rc = ring_cols[ri % len(ring_cols)]
+                pygame.draw.circle(self.screen, rc, (acx, acy), rr, 2)
+
+            # Radial spoke lines from centre (like amphitheatre floor divisions)
+            for si in range(12):
+                sang = (math.pi * 2 / 12) * si
+                ex2 = acx + int(math.cos(sang) * 680)
+                ey2 = acy + int(math.sin(sang) * 680)
+                pygame.draw.line(self.screen, (175, 152, 100), (acx, acy), (ex2, ey2), 1)
+
+            # Central decorative medallion
+            pygame.draw.circle(self.screen, (175, 155, 108), (acx, acy), 40, 3)
+            pygame.draw.circle(self.screen, (185, 168, 122), (acx, acy), 22, 2)
+            pygame.draw.circle(self.screen, (195, 178, 135), (acx, acy), 8)
+
+            # Greek meander key pattern along world boundary (screen-clipped)
+            bx2 = int(-cam[0]); by2 = int(-cam[1])
+            bw2 = self.world_w; bh2 = self.world_h
+            meander_col = (165, 140, 88)
+            step = 32
+            for mx2 in range(bx2, bx2 + bw2, step):
+                if -step < mx2 < SW + step:
+                    # top edge key notch
+                    pygame.draw.rect(self.screen, meander_col,
+                                     (mx2, by2 + 8, step // 2, 4))
+                    pygame.draw.rect(self.screen, meander_col,
+                                     (mx2, by2 + 8, 4, 12))
+                    # bottom edge
+                    pygame.draw.rect(self.screen, meander_col,
+                                     (mx2, by2 + bh2 - 24, step // 2, 4))
+                    pygame.draw.rect(self.screen, meander_col,
+                                     (mx2, by2 + bh2 - 24, 4, 12))
+            for my2 in range(by2, by2 + bh2, step):
+                if -step < my2 < SH + step:
+                    pygame.draw.rect(self.screen, meander_col,
+                                     (bx2 + 8, my2, 4, step // 2))
+                    pygame.draw.rect(self.screen, meander_col,
+                                     (bx2 + 8, my2, 12, 4))
+                    pygame.draw.rect(self.screen, meander_col,
+                                     (bx2 + bw2 - 24, my2, 4, step // 2))
+                    pygame.draw.rect(self.screen, meander_col,
+                                     (bx2 + bw2 - 24, my2, 12, 4))
+
+            # Draw pillars (world-space)
+            for pwx, pwy, pheight, gphase in self.sera_pillars:
+                psx = int(pwx - cam[0]); psy = int(pwy - cam[1])
+                if -80 < psx < SW + 80 and -80 < psy < SH + 80:
+                    pw2 = 18   # pillar width
+                    # Shadow beneath pillar
+                    pygame.draw.ellipse(self.screen, (165, 148, 116),
+                                        (psx - pw2, psy + pheight // 2 - 4, pw2 * 2, 12))
+                    # Base plinth
+                    pygame.draw.rect(self.screen, (210, 200, 170),
+                                     (psx - pw2 - 3, psy + pheight // 2 - 6,
+                                      pw2 * 2 + 6, 8), border_radius=2)
+                    # Shaft — fluted column (3 vertical grooves)
+                    shaft_top = psy - pheight // 2
+                    shaft_bot = psy + pheight // 2 - 6
+                    shaft_h   = shaft_bot - shaft_top
+                    pygame.draw.rect(self.screen, (215, 205, 175),
+                                     (psx - pw2, shaft_top, pw2 * 2, shaft_h))
+                    # Flute grooves
+                    for fi in range(1, 4):
+                        fx2 = psx - pw2 + (pw2 * 2 // 4) * fi
+                        pygame.draw.line(self.screen, (190, 178, 148),
+                                         (fx2, shaft_top + 4), (fx2, shaft_bot - 4), 1)
+                    # Highlights on shaft edges
+                    pygame.draw.line(self.screen, (230, 222, 196),
+                                     (psx - pw2, shaft_top), (psx - pw2, shaft_bot), 1)
+                    # Capital (top block)
+                    pygame.draw.rect(self.screen, (220, 210, 180),
+                                     (psx - pw2 - 4, shaft_top - 8,
+                                      pw2 * 2 + 8, 10), border_radius=2)
+                    pygame.draw.rect(self.screen, (210, 198, 165),
+                                     (psx - pw2 - 2, shaft_top - 4,
+                                      pw2 * 2 + 4, 6))
+                    # Divine glow pulse around pillar top
+                    glow_p = math.sin(t_sera * 0.002 + gphase) * 0.5 + 0.5
+                    gc_r = max(0, min(255, int(240 + glow_p * 15)))
+                    gc_g = max(0, min(255, int(210 + glow_p * 20)))
+                    gc_b = max(0, min(255, int(100 + glow_p * 60)))
+                    pygame.draw.circle(self.screen, (gc_r, gc_g, gc_b),
+                                       (psx, shaft_top - 4),
+                                       max(1, int(4 + glow_p * 4)), 1)
+
+        # ── Nyxoth: nebulas ───────────────────────────────────────────────────
         if is_nyxoth:
             for wx, wy, r, col, alpha in self.nyx_nebulas:
                 nsx = int(wx - cam[0]); nsy = int(wy - cam[1])
@@ -5111,19 +5851,17 @@ class Game:
                         pygame.draw.circle(ns, (*lc, la), (lr + 2, lr + 2), lr)
                         self.screen.blit(ns, (nsx - lr - 2, nsy - lr - 2))
 
-        # Malachar: draw lava flow rivers
+        # ── Malachar: lava rivers ─────────────────────────────────────────────
         if is_malachar:
             t_lava = pygame.time.get_ticks()
             for flow_pts, flow_w, phase in self.mal_lava_flows:
                 screen_pts = [(int(wx - cam[0]), int(wy - cam[1])) for wx, wy in flow_pts]
-                # Cheap cull — skip if no point near screen
                 if not any(-200 < sx2 < SW + 200 and -200 < sy2 < SH + 200
                            for sx2, sy2 in screen_pts):
                     continue
                 if len(screen_pts) < 2:
                     continue
                 glow = math.sin(t_lava * 0.003 + phase) * 0.5 + 0.5
-                # 2 passes: crust then bright core (inner highlight removed — core is bright enough)
                 lava_outer = (max(0, min(255, int(60 + 40 * glow))),
                               max(0, min(255, int(20 + 10 * glow))), 0)
                 lava_core  = (max(0, min(255, int(200 + 55 * glow))),
@@ -5132,7 +5870,90 @@ class Game:
                 pygame.draw.lines(self.screen, lava_outer, False, screen_pts, flow_w + 4)
                 pygame.draw.lines(self.screen, lava_core,  False, screen_pts, max(2, flow_w - 2))
 
-        pygame.draw.rect(self.screen, RED, (-cam[0], -cam[1], self.world_w, self.world_h), 4)
+        # ── Gorvak: dungeon chains and lanterns ───────────────────────────────
+        if is_gorvak:
+            t_gorv = pygame.time.get_ticks()
+
+            # ── Lantern light pools FIRST (drawn under chains) ────────────────
+            for lwx, lwy, lphase, lrad in self.gorv_lanterns:
+                lsx = int(lwx - cam[0]); lsy = int(lwy - cam[1])
+                if -lrad - 20 < lsx < SW + lrad + 20 and -lrad - 20 < lsy < SH + lrad + 20:
+                    # Very slow natural torch flicker — two slow sines
+                    flicker = (math.sin(t_gorv * 0.0018 + lphase) * 0.28 +
+                               math.sin(t_gorv * 0.0047 + lphase * 2.3) * 0.12 + 0.62)
+                    flicker = max(0.3, min(1.0, flicker))
+                    cur_r   = int(lrad * flicker)
+
+                    # Filled light pool — 5 concentric filled circles fading outward
+                    # Each layer blends the warm amber into the stone floor colour
+                    for gi in range(5):
+                        t_layer = 1 - gi / 5.0            # 1.0 at centre → 0.2 outer
+                        gr      = max(1, int(cur_r * (1 - gi * 0.18)))
+                        # Centre: bright warm yellow; edge: dim amber barely above floor
+                        lc_r = max(0, min(255, int(42 + t_layer * (flicker * 90))))
+                        lc_g = max(0, min(255, int(36 + t_layer * (flicker * 45))))
+                        lc_b = max(0, min(255, int(26 + t_layer * (flicker * 8))))
+                        pygame.draw.circle(self.screen, (lc_r, lc_g, lc_b), (lsx, lsy), gr)
+
+                    # Lantern body — small iron bracket + cage
+                    lw2 = 7
+                    # Wall bracket arm
+                    pygame.draw.line(self.screen, (90, 80, 66),
+                                     (lsx, lsy - lw2 * 3), (lsx, lsy - lw2), 2)
+                    # Cage box
+                    pygame.draw.rect(self.screen, (55, 48, 38),
+                                     (lsx - lw2, lsy - lw2 * 2, lw2 * 2, lw2 * 2 + 2),
+                                     border_radius=2)
+                    pygame.draw.rect(self.screen, (110, 96, 76),
+                                     (lsx - lw2, lsy - lw2 * 2, lw2 * 2, lw2 * 2 + 2),
+                                     1, border_radius=2)
+                    # Vertical cage bars
+                    for bxi in range(-1, 2):
+                        pygame.draw.line(self.screen, (90, 78, 62),
+                                         (lsx + bxi * lw2 // 2, lsy - lw2 * 2),
+                                         (lsx + bxi * lw2 // 2, lsy), 1)
+                    # Flame glow inside cage
+                    fc_r = max(0, min(255, int(255 * flicker)))
+                    fc_g = max(0, min(255, int(140 + flicker * 60)))
+                    pygame.draw.circle(self.screen, (fc_r, fc_g, 20),
+                                       (lsx, lsy - lw2), max(2, int(4 * flicker)))
+                    # Bright flare at tip
+                    pygame.draw.circle(self.screen, (255, 230, 160),
+                                       (lsx, lsy - lw2), max(1, int(2 * flicker)))
+
+            # ── Hanging chains (drawn over the light pools) ───────────────────
+            for chain_pts, chain_w in self.gorv_chains:
+                spts = [(int(wx - cam[0]), int(wy - cam[1])) for wx, wy in chain_pts]
+                if not any(-40 < sx2 < SW + 40 and -40 < sy2 < SH + 40 for sx2, sy2 in spts):
+                    continue
+                if len(spts) >= 2:
+                    # Dark shadow pass
+                    pygame.draw.lines(self.screen, (30, 26, 22), False, spts, chain_w + 3)
+                    # Main chain — warm iron grey, clearly visible
+                    pygame.draw.lines(self.screen, (110, 96, 78), False, spts, chain_w + 1)
+                    # Bright highlight pass
+                    pygame.draw.lines(self.screen, (150, 134, 112), False, spts, max(1, chain_w - 1))
+                    # Link oval at each joint
+                    for sx2, sy2 in spts:
+                        pygame.draw.circle(self.screen, (130, 116, 96), (sx2, sy2), chain_w + 1)
+                        pygame.draw.circle(self.screen, (170, 152, 128), (sx2, sy2), max(1, chain_w - 1))
+
+        # ── World boundary ────────────────────────────────────────────────────
+        bx = -cam[0]; by = -cam[1]
+        if is_seraphix:
+            pygame.draw.rect(self.screen, (210, 195, 155), (bx, by, self.world_w, self.world_h), 12)
+            pygame.draw.rect(self.screen, (190, 165, 90),  (bx, by, self.world_w, self.world_h), 5)
+            pygame.draw.rect(self.screen, (230, 210, 150), (bx, by, self.world_w, self.world_h), 2)
+        elif is_gorvak:
+            # Heavy iron-bound dungeon wall
+            pygame.draw.rect(self.screen, (30, 24, 18), (bx, by, self.world_w, self.world_h), 14)
+            pygame.draw.rect(self.screen, (55, 46, 36), (bx, by, self.world_w, self.world_h), 5)
+            pygame.draw.rect(self.screen, (80, 68, 52), (bx, by, self.world_w, self.world_h), 2)
+        else:
+            wall_col  = (50, 55, 75) if is_normal else (60, 20, 80) if (is_vexara or self.elite_wave) else (60, 20, 20) if is_malachar else (20, 20, 50)
+            wall_col2 = (30, 34, 48) if is_normal else (40, 10, 60) if (is_vexara or self.elite_wave) else (40, 10, 10) if is_malachar else (10, 10, 30)
+            pygame.draw.rect(self.screen, wall_col,  (bx, by, self.world_w, self.world_h), 8)
+            pygame.draw.rect(self.screen, wall_col2, (bx, by, self.world_w, self.world_h), 3)
 
     def draw_hud(self):
         p = self.player
@@ -5413,11 +6234,18 @@ class Game:
                         px2, py2 = event.pos
                         DPX = SW // 2 - 170; DPY = SH // 2 - 80
                         DPW = 340
-                        DPH = 498 if self.dev_boss_expand else 312
+                        DPH = 368   # fixed height — 5 buttons
                         gold_rect  = pygame.Rect(DPX + 20, DPY + 70,  DPW - 40, 44)
                         lvl_rect   = pygame.Rect(DPX + 20, DPY + 126, DPW - 40, 44)
                         skip_rect  = pygame.Rect(DPX + 20, DPY + 182, DPW - 40, 44)
                         boss_rect  = pygame.Rect(DPX + 20, DPY + 238, DPW - 40, 44)
+                        perk_rect  = pygame.Rect(DPX + 20, DPY + 294, DPW - 40, 44)
+                        # Boss flyout — to the right
+                        FLY_W = 220; FLY_X = DPX + DPW + 8; FLY_Y = DPY
+                        FLY_H = 20 + len(BOSS_TYPES) * 34 + 8
+                        # Perk flyout — to the left
+                        PKW = 220; PKX = DPX - PKW - 8; PKY = DPY
+                        PKH = 20 + len(ALL_PERKS) * 34 + 8
                         if gold_rect.collidepoint(px2, py2):
                             self.player.gold += 100
                             continue
@@ -5434,26 +6262,52 @@ class Game:
                             self._skip_wave()
                             self.pause_dev = False
                             self.paused    = False
+                            self.dev_boss_expand = False
+                            self.dev_perk_expand = False
                             continue
                         if boss_rect.collidepoint(px2, py2):
                             self.dev_boss_expand = not self.dev_boss_expand
+                            self.dev_perk_expand = False
                             continue
-                        # Boss pick buttons (only when expanded)
+                        if perk_rect.collidepoint(px2, py2):
+                            self.dev_perk_expand = not self.dev_perk_expand
+                            self.dev_boss_expand = False
+                            continue
+                        # Boss flyout buttons
                         if self.dev_boss_expand:
                             for bi, bt in enumerate(BOSS_TYPES):
-                                boss_btn = pygame.Rect(DPX + 20, DPY + 294 + bi * 34, DPW - 40, 28)
+                                boss_btn = pygame.Rect(FLY_X + 8, FLY_Y + 20 + bi * 34, FLY_W - 16, 28)
                                 if boss_btn.collidepoint(px2, py2):
                                     self._skip_to_boss(bi)
                                     self.dev_boss_expand = False
                                     self.pause_dev = False
                                     self.paused    = False
                                     continue
-                        if not (DPX <= px2 <= DPX + DPW and DPY <= py2 <= DPY + DPH):
+                        # Perk flyout buttons
+                        if self.dev_perk_expand:
+                            for pi, pd in enumerate(ALL_PERKS):
+                                perk_btn = pygame.Rect(PKX + 8, PKY + 20 + pi * 34, PKW - 16, 28)
+                                if perk_btn.collidepoint(px2, py2):
+                                    self.player.perks[pd["key"]] = (
+                                        self.player.perks.get(pd["key"], 0) + pd["bonus"])
+                                    self.floating_texts.append(
+                                        FloatingText(self.player.x, self.player.y - 60,
+                                                     f"[DEV] +{pd['label']}!", pd["color"], 20))
+                                    continue
+                        # Close if clicked outside all panels
+                        in_main  = DPX <= px2 <= DPX + DPW and DPY <= py2 <= DPY + DPH
+                        in_boss  = (self.dev_boss_expand and
+                                    FLY_X <= px2 <= FLY_X + FLY_W and FLY_Y <= py2 <= FLY_Y + FLY_H)
+                        in_perk  = (self.dev_perk_expand and
+                                    PKX <= px2 <= PKX + PKW and PKY <= py2 <= PKY + PKH)
+                        if not (in_main or in_boss or in_perk):
                             self.pause_dev = False
                             self.dev_boss_expand = False
+                            self.dev_perk_expand = False
                     if event.type == pygame.KEYDOWN and event.key in (pygame.K_ESCAPE, pygame.K_p):
                         self.pause_dev = False
                         self.dev_boss_expand = False
+                        self.dev_perk_expand = False
                     continue
                 # Settings slider drag while paused
                 if self.paused and self.pause_settings:
@@ -5765,19 +6619,26 @@ class Game:
                                     self.floating_texts.append(
                                         FloatingText(self.boss.x, self.boss.y - 80,
                                                      f"{self.boss.name} ENRAGES!", (255, 80, 80), 24))
-                                continue
-                            # Hit Vexara clone
-                            if self.boss_clone and self.boss_clone.alive:
-                                if math.hypot(proj.x - self.boss_clone.x, proj.y - self.boss_clone.y) < proj.size + self.boss_clone.size:
-                                    self.boss_clone.take_damage(proj.dmg)
+                                if getattr(self.boss, '_trigger_mal_spin', False):
+                                    self.boss._trigger_mal_spin = False
+                                    SOUNDS.play("orc_spin", volume_scale=1.0)
                                     self.floating_texts.append(
-                                        FloatingText(self.boss_clone.x, self.boss_clone.y - 30,
-                                                     f"-{proj.dmg}", (255, 100, 100)))
-                                    for _ in range(5):
-                                        self.particles.append(Particle(proj.x, proj.y, self.boss_clone.proj_col))
-                                    proj.alive = False
-                                    continue
-                            # Hit Gorvak minions
+                                        FloatingText(self.boss.x, self.boss.y - 60,
+                                                     "INFERNO SPIN!", (255, 140, 20), 22))
+                                continue
+                        # Hit Vexara clone — checked independently of main boss alive state
+                        if self.boss_clone and self.boss_clone.alive:
+                            if math.hypot(proj.x - self.boss_clone.x, proj.y - self.boss_clone.y) < proj.size + self.boss_clone.size:
+                                self.boss_clone.take_damage(proj.dmg)
+                                self.floating_texts.append(
+                                    FloatingText(self.boss_clone.x, self.boss_clone.y - 30,
+                                                 f"-{proj.dmg}", (255, 100, 100)))
+                                for _ in range(5):
+                                    self.particles.append(Particle(proj.x, proj.y, self.boss_clone.proj_col))
+                                proj.alive = False
+                                continue
+                        # Hit Gorvak minions
+                        if self.boss and self.boss.alive:
                             for m in self.boss.minions:
                                 if m.alive and math.hypot(proj.x - m.x, proj.y - m.y) < proj.size + m.SIZE:
                                     m.take_damage(proj.dmg)
@@ -5926,6 +6787,84 @@ class Game:
                 # Cinematic draws darkness + boss materialisation + HUD on top
                 self.boss_intro.draw(self.screen, cam, self.draw_hud)
             else:
+                # ── Gorvak dungeon overlay (torchlight flicker, under HUD) ────
+                is_gorvak_boss = (self.boss_wave and self.boss and
+                                  getattr(self.boss, 'pattern', None) == "burst")
+                if is_gorvak_boss:
+                    t_now = pygame.time.get_ticks()
+                    # Torchlight flicker — warm amber tint that subtly breathes
+                    flicker = (math.sin(t_now * 0.011) * 0.35 +
+                               math.sin(t_now * 0.029) * 0.15 + 0.5)
+                    flicker = max(0.0, min(1.0, flicker))
+                    tint_r  = max(0, min(255, int(40 + flicker * 25)))
+                    tint_g  = max(0, min(255, int(18 + flicker * 10)))
+                    self._overlay.fill((tint_r, tint_g, 0, 35))
+                    self.screen.blit(self._overlay, (0, 0))
+
+                # ── Seraphix arena overlay (divine light, under HUD) ──────────
+                is_seraphix_boss = (self.boss_wave and self.boss and
+                                    getattr(self.boss, 'pattern', None) == "orbit")
+                if is_seraphix_boss:
+                    t_now = pygame.time.get_ticks()
+
+                    # Warm golden tint — subtle, pulsing gently
+                    pulse_s = math.sin(t_now * 0.0015) * 0.5 + 0.5
+                    tint_r  = max(0, min(255, int(60 + pulse_s * 30)))
+                    tint_g  = max(0, min(255, int(40 + pulse_s * 20)))
+                    self._overlay.fill((tint_r, tint_g, 0, 28))
+                    self.screen.blit(self._overlay, (0, 0))
+
+                    # Diagonal divine light shafts (screen-space, slow drift)
+                    shaft_alpha = max(0, min(255, int(18 + pulse_s * 12)))
+                    self._overlay.fill((0, 0, 0, 0))
+                    for si in range(5):
+                        shaft_x = int((SW * si / 4 + t_now * 0.008 * (1 + si * 0.3)) % (SW + 200)) - 100
+                        shaft_w = 30 + si * 12
+                        pts_shaft = [
+                            (shaft_x,           -20),
+                            (shaft_x + shaft_w, -20),
+                            (shaft_x + shaft_w + 80, SH + 20),
+                            (shaft_x + 80,           SH + 20),
+                        ]
+                        sa = max(0, min(255, shaft_alpha - si * 2))
+                        if sa > 2:
+                            pygame.draw.polygon(self._overlay,
+                                                (255, 230, 140, sa), pts_shaft)
+                    self.screen.blit(self._overlay, (0, 0))
+
+                    # Spawn floating divine motes
+                    self.sera_mote_cd -= 1
+                    if self.sera_mote_cd <= 0:
+                        self.sera_mote_cd = random.randint(3, 9)
+                        ex = cam[0] + random.randint(0, SW)
+                        ey = cam[1] + random.randint(0, SH)
+                        self.sera_motes.append([
+                            float(ex), float(ey),
+                            random.uniform(-0.4, 0.4),   # vx drift
+                            random.uniform(-1.4, -0.3),  # vy upward
+                            random.randint(40, 100),
+                            random.randint(40, 100),
+                            random.randint(2, 5),
+                        ])
+
+                    # Update + draw motes — direct solid circles
+                    surviving_sm = []
+                    for sm in self.sera_motes:
+                        sm[0] += sm[2]; sm[1] += sm[3]
+                        sm[4] -= 1
+                        if sm[4] > 0:
+                            surviving_sm.append(sm)
+                            st  = sm[4] / sm[5]
+                            smx = int(sm[0] - cam[0]); smy = int(sm[1] - cam[1])
+                            if -8 < smx < SW + 8 and -8 < smy < SH + 8:
+                                sr  = max(1, int(sm[6] * st))
+                                # Colour: bright gold → pale yellow → white
+                                scr = max(0, min(255, int(255)))
+                                scg = max(0, min(255, int(200 + st * 40)))
+                                scb = max(0, min(255, int(80 + st * 140)))
+                                pygame.draw.circle(self.screen, (scr, scg, scb), (smx, smy), sr)
+                    self.sera_motes = surviving_sm
+
                 # ── Malachar arena overlay (world-space, under HUD) ───────────
                 is_malachar_boss = (self.boss_wave and self.boss and
                                     getattr(self.boss, 'pattern', None) == "charge")
@@ -6246,7 +7185,7 @@ class Game:
                 if self.pause_dev:
                     DPX = SW // 2 - 170; DPY = SH // 2 - 80
                     DPW = 340
-                    DPH = 498 if self.dev_boss_expand else 312
+                    DPH = 368   # fixed — 5 buttons
                     DEV_COL = (255, 160, 40)
 
                     pygame.draw.rect(self.screen, PANEL,    (DPX, DPY, DPW, DPH), border_radius=14)
@@ -6257,7 +7196,6 @@ class Game:
                     pygame.draw.line(self.screen, (70, 55, 30),
                                      (DPX + 16, DPY + 50), (DPX + DPW - 16, DPY + 50), 1)
 
-                    # Wave status hint
                     if self.wave_active and self.boss_wave:
                         wave_hint = f"Boss wave {self.wave}"
                     elif self.wave_active and self.elite_wave:
@@ -6269,16 +7207,18 @@ class Game:
                     wh = self.fonts["tiny"].render(wave_hint, True, GRAY)
                     self.screen.blit(wh, (DPX + DPW // 2 - wh.get_width() // 2, DPY + 53))
 
-                    # Four buttons
                     skip_col  = (255, 100, 100)
                     boss_col  = (255, 120, 200)
+                    perk_col  = (100, 220, 140)
                     next_wave = self.wave + 1 if not self.wave_active else self.wave
-                    boss_label = "▾ Skip to Boss Wave" if self.dev_boss_expand else "▸ Skip to Boss Wave"
+                    boss_label = "▸ Skip to Boss ◂" if self.dev_boss_expand else "▸ Skip to Boss Wave"
+                    perk_label = "◂ Give Perk ▸"    if self.dev_perk_expand else "▸ Give Perk"
                     for label, val_str, col, row in [
                         ("+100 Gold",   f"Current: {self.player.gold}g",      YELLOW,   0),
                         ("+1 Level",    f"Current: Lvl {self.player.level}",  CYAN,     1),
                         ("Skip Wave",   f">> Wave {next_wave}",               skip_col, 2),
-                        (boss_label,    "pick a boss below" if self.dev_boss_expand else "expand to pick", boss_col, 3),
+                        (boss_label,    "→ right panel",                      boss_col, 3),
+                        (perk_label,    "← left panel",                       perk_col, 4),
                     ]:
                         btn = pygame.Rect(DPX + 20, DPY + 70 + row * 56, DPW - 40, 44)
                         pygame.draw.rect(self.screen, lerp_color(PANEL, col, 0.22), btn, border_radius=8)
@@ -6289,26 +7229,49 @@ class Game:
                         self.screen.blit(vl, (btn.right - vl.get_width() - 14,
                                               btn.centery - vl.get_height() // 2))
 
-                    # Boss picker sub-list
+                    # ── Boss flyout — to the RIGHT ────────────────────────────
                     if self.dev_boss_expand:
-                        pygame.draw.line(self.screen, (70, 55, 30),
-                                         (DPX + 16, DPY + 290), (DPX + DPW - 16, DPY + 290), 1)
+                        FLY_W = 220; FLY_X = DPX + DPW + 8; FLY_Y = DPY
+                        FLY_H = 20 + len(BOSS_TYPES) * 34 + 8
+                        pygame.draw.rect(self.screen, PANEL,   (FLY_X, FLY_Y, FLY_W, FLY_H), border_radius=10)
+                        pygame.draw.rect(self.screen, boss_col,(FLY_X, FLY_Y, FLY_W, FLY_H), 1, border_radius=10)
+                        fh = self.fonts["tiny"].render("Select Boss", True, boss_col)
+                        self.screen.blit(fh, (FLY_X + FLY_W // 2 - fh.get_width() // 2, FLY_Y + 4))
                         boss_colors = [
-                            (220, 60,  60),
-                            (200, 80,  255),
-                            (80,  180, 80),
-                            (255, 220, 60),
-                            (80,  80,  220),
+                            (220, 60, 60), (200, 80, 255), (80, 180, 80),
+                            (255, 220, 60), (80, 80, 220),
                         ]
                         for bi, bt in enumerate(BOSS_TYPES):
                             bcol     = boss_colors[bi % len(boss_colors)]
-                            boss_btn = pygame.Rect(DPX + 20, DPY + 294 + bi * 34, DPW - 40, 28)
-                            pygame.draw.rect(self.screen, lerp_color(PANEL, bcol, 0.18),
-                                             boss_btn, border_radius=6)
+                            boss_btn = pygame.Rect(FLY_X + 8, FLY_Y + 20 + bi * 34, FLY_W - 16, 28)
+                            pygame.draw.rect(self.screen, lerp_color(PANEL, bcol, 0.18), boss_btn, border_radius=6)
                             pygame.draw.rect(self.screen, bcol, boss_btn, 1, border_radius=6)
                             bn = self.fonts["small"].render(bt["name"], True, bcol)
-                            self.screen.blit(bn, (boss_btn.x + 10,
+                            self.screen.blit(bn, (boss_btn.x + 8,
                                                    boss_btn.centery - bn.get_height() // 2))
+
+                    # ── Perk flyout — to the LEFT ─────────────────────────────
+                    if self.dev_perk_expand:
+                        PKW = 220; PKX = DPX - PKW - 8; PKY = DPY
+                        PKH = 20 + len(ALL_PERKS) * 34 + 8
+                        pygame.draw.rect(self.screen, PANEL,   (PKX, PKY, PKW, PKH), border_radius=10)
+                        pygame.draw.rect(self.screen, perk_col,(PKX, PKY, PKW, PKH), 1, border_radius=10)
+                        ph = self.fonts["tiny"].render("Give Perk (stackable)", True, perk_col)
+                        self.screen.blit(ph, (PKX + PKW // 2 - ph.get_width() // 2, PKY + 4))
+                        for pi, pd in enumerate(ALL_PERKS):
+                            pcol     = pd["color"]
+                            perk_btn = pygame.Rect(PKX + 8, PKY + 20 + pi * 34, PKW - 16, 28)
+                            pygame.draw.rect(self.screen, lerp_color(PANEL, pcol, 0.18), perk_btn, border_radius=6)
+                            pygame.draw.rect(self.screen, pcol, perk_btn, 1, border_radius=6)
+                            pn = self.fonts["small"].render(pd["label"], True, pcol)
+                            self.screen.blit(pn, (perk_btn.x + 8,
+                                                   perk_btn.centery - pn.get_height() // 2))
+                            cur_val = self.player.perks.get(pd["key"], 0)
+                            if cur_val > 0:
+                                stacks = round(cur_val / pd["bonus"])
+                                sv = self.fonts["tiny"].render(f"×{stacks}", True, GRAY)
+                                self.screen.blit(sv, (perk_btn.right - sv.get_width() - 8,
+                                                       perk_btn.centery - sv.get_height() // 2))
 
                     close_d = self.fonts["tiny"].render(
                         "Click outside or press P / ESC to close", True, GRAY)
@@ -6347,7 +7310,7 @@ class Game:
 
 if __name__ == "__main__":
     _screen = pygame.display.set_mode((SW, SH))
-    pygame.display.set_caption("Dungeon Crawler 37.0b9")
+    pygame.display.set_caption("Dungeon Crawler 40.1b3")
 
     # Window icon
     _icon_path = asset("icon.png")
