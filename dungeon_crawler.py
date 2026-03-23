@@ -4,6 +4,9 @@ import random
 import sys
 import json
 import os
+import threading
+import urllib.request
+import webbrowser
 
 try:
     import cv2
@@ -12,8 +15,14 @@ try:
 except ImportError:
     _CV2_AVAILABLE = False
 
+pygame.mixer.pre_init(44100, -16, 2, 512)   # macOS needs explicit buffer size
 pygame.init()
 pygame.mixer.init()
+
+# ── Platform detection ────────────────────────────────────────────────────────
+IS_MACOS   = sys.platform == "darwin"
+IS_WINDOWS = sys.platform == "win32"
+_PLATFORM_TAG = "macos" if IS_MACOS else "win"   # used by version-check zip filter
 
 # ── Asset path helper ─────────────────────────────────────────────────────────
 #
@@ -23,19 +32,22 @@ pygame.mixer.init()
 #
 # When frozen by PyInstaller (--onefile or --onedir):
 #   sys._MEIPASS = temp unpacked bundle  → read-only assets live here
-#   sys.executable dir                   → next to the .exe, writable → leaderboard goes here
+#   macOS  : ~/Library/Application Support/DungeonCrawler  → user data lives here
+#   Windows: folder next to the .exe                       → user data lives here
 
 def _get_asset_dir():
     """Directory that holds the bundled read-only assets (sounds, images, video)."""
     if getattr(sys, "frozen", False):
-        # PyInstaller unpacks assets into sys._MEIPASS
         return sys._MEIPASS
     return os.path.dirname(os.path.abspath(__file__))
 
 def _get_data_dir():
-    """Writable directory for user data (leaderboard.json) that persists across runs."""
+    """Writable directory for user data that persists across runs."""
     if getattr(sys, "frozen", False):
-        # Place next to the .exe so it survives between launches
+        if IS_MACOS:
+            base = os.path.expanduser("~/Library/Application Support/DungeonCrawler")
+            os.makedirs(base, exist_ok=True)
+            return base
         return os.path.dirname(sys.executable)
     return os.path.dirname(os.path.abspath(__file__))
 
@@ -45,6 +57,12 @@ DATA_DIR  = _get_data_dir()
 def asset(filename):
     """Return full path to a read-only asset inside the assets/ folder."""
     return os.path.join(ASSET_DIR, "assets", filename)
+
+def _make_font(size, bold=False):
+    """Return a monospace SysFont that works on Windows and macOS.
+    Tries Consolas (Windows) → Menlo (macOS) → Courier New → DejaVu Sans Mono."""
+    return pygame.font.SysFont(
+        "consolas, menlo, couriernew, dejavusansmono", size, bold=bold)
 
 # ── Music manager ─────────────────────────────────────────────────────────────
 
@@ -322,7 +340,7 @@ class Leaderboard:
 
     def _load(self):
         try:
-            with open(LEADERBOARD_FILE, "r") as f:
+            with open(LEADERBOARD_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
             # Validate shape
             entries = []
@@ -335,7 +353,7 @@ class Leaderboard:
 
     def _save(self):
         try:
-            with open(LEADERBOARD_FILE, "w") as f:
+            with open(LEADERBOARD_FILE, "w", encoding="utf-8") as f:
                 json.dump(self.entries, f, indent=2)
         except Exception as e:
             print(f"[Leaderboard] Could not save: {e}")
@@ -438,14 +456,14 @@ class TokenWallet:
 
     def _load_raw(self):
         try:
-            with open(TOKEN_FILE, "r") as f:
+            with open(TOKEN_FILE, "r", encoding="utf-8") as f:
                 return json.load(f)
         except (FileNotFoundError, json.JSONDecodeError):
             return {}
 
     def _save(self):
         try:
-            with open(TOKEN_FILE, "w") as f:
+            with open(TOKEN_FILE, "w", encoding="utf-8") as f:
                 json.dump({
                     "tokens":          self.total,
                     "owned_cosmetics": list(self.owned_cosmetics),
@@ -518,14 +536,14 @@ class GameSettings:
 
     def _load(self):
         try:
-            with open(SETTINGS_FILE, "r") as f:
+            with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
                 return json.load(f)
         except (FileNotFoundError, json.JSONDecodeError):
             return {}
 
     def save(self):
         try:
-            with open(SETTINGS_FILE, "w") as f:
+            with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
                 json.dump({
                     "quality":       self.quality,
                     "music_volume":  MUSIC.volume,
@@ -561,25 +579,116 @@ DARK   = (18, 18, 28)
 PANEL  = (28, 28, 42)
 
 WAVE_BREAK_SECS = 10
-GAME_VERSION    = "41.0 Build 2"
+GAME_VERSION    = "42.0b14"
+
+# ── Online version check ──────────────────────────────────────────────────────
+_GH_API_URL  = "https://api.github.com/repos/gert-leja/dungeon_crawler/releases"
+_update_info = {}   # filled by background thread: {"version", "url", "notes"}
+
+def _fetch_latest_release():
+    print(f"[VersionCheck] Starting check — current version: {GAME_VERSION}")
+    print(f"[VersionCheck] Fetching: {_GH_API_URL}")
+    try:
+        req = urllib.request.Request(
+            _GH_API_URL,
+            headers={"User-Agent": "DungeonCrawlerVersionCheck/1.0"}
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            status = resp.status
+            print(f"[VersionCheck] HTTP {status} — response received")
+            raw  = resp.read().decode()
+            data = json.loads(raw)
+
+            # /releases returns a list sorted newest-first — take the first entry
+            # which includes pre-releases, unlike /releases/latest which skips them
+            if not data:
+                print("[VersionCheck] No releases found on this repo.")
+                return
+            release = data[0]
+
+            tag   = release.get("tag_name", "").lstrip("v")
+            notes = release.get("name", "")
+            is_pre = release.get("prerelease", False)
+            print(f"[VersionCheck] Latest release tag: '{release.get('tag_name', '')}' → stripped: '{tag}'"
+                  f"  (pre-release: {is_pre})")
+            print(f"[VersionCheck] Release title: '{notes}'")
+
+            assets = release.get("assets", [])
+            print(f"[VersionCheck] Assets found: {len(assets)}")
+            for a in assets:
+                print(f"[VersionCheck]   asset: {a['name']} ({a.get('size', 0)} bytes)")
+
+            # Prefer the asset whose name contains the platform tag ("win" or "macos")
+            # before ".zip", e.g. DungeonCrawler_42.0_win.zip / DungeonCrawler_42.0_macos.zip
+            def _is_platform_zip(name):
+                n = name.lower()
+                return n.endswith(".zip") and _PLATFORM_TAG in n
+
+            zip_url = next(
+                (a["browser_download_url"] for a in assets if _is_platform_zip(a["name"])),
+                # Fall back to any .zip if no platform-specific one exists
+                next(
+                    (a["browser_download_url"] for a in assets
+                     if a["name"].lower().endswith(".zip")),
+                    release.get("html_url", "")
+                )
+            )
+            print(f"[VersionCheck] Platform tag: '{_PLATFORM_TAG}'")
+            print(f"[VersionCheck] Download URL resolved: {zip_url}")
+
+            _update_info["version"] = tag
+            _update_info["url"]     = zip_url
+            _update_info["notes"]   = notes
+            _update_info["prerelease"] = is_pre
+
+            if tag == GAME_VERSION:
+                print(f"[VersionCheck] Up to date — no banner will show.")
+            else:
+                pre_tag = " (pre-release)" if is_pre else ""
+                print(f"[VersionCheck] Update available: '{GAME_VERSION}' → '{tag}'{pre_tag} — banner will show.")
+
+    except urllib.error.HTTPError as e:
+        print(f"[VersionCheck] HTTP error {e.code}: {e.reason}")
+        if e.code == 404:
+            print("[VersionCheck]   → Repo not found or no releases yet. Check YOUR_USERNAME/YOUR_REPO in _GH_API_URL.")
+        elif e.code == 403:
+            print("[VersionCheck]   → Rate limited or missing User-Agent header.")
+    except urllib.error.URLError as e:
+        print(f"[VersionCheck] Network error: {e.reason}")
+        print("[VersionCheck]   → No internet connection or DNS failure.")
+    except json.JSONDecodeError as e:
+        print(f"[VersionCheck] Failed to parse response as JSON: {e}")
+    except Exception as e:
+        print(f"[VersionCheck] Unexpected error: {type(e).__name__}: {e}")
+
+threading.Thread(target=_fetch_latest_release, daemon=True).start()
 
 # ── Patch notes (2 most recent, newest first) ─────────────────────────────────
 # Each entry: {"version": str, "date": str, "changes": [("category", "text"), ...]}
 # Categories: "added", "changed", "fixed", "removed"
 PATCH_NOTES = [
     {
+        "version": "42.0",
+        "date":    "23-03-2026",
+        "changes": [
+            ("added",   "Automated update checking for new release upon launch."),
+            ("added",   "Enemies and bosses now drop HP orbs upon death occasionally."),
+            ("added",   "Bosses now have an enraged mode animation that shows when they enter enraged mode."),
+            ("added",   "Game is now compatible with MacOS (some features may still be broken)."),
+            ("changed",   "Seraphix enraged mode dash cooldown has been increased."),
+            ("changed",   "Nail Gun range increased from 260 to 380"),
+            ("changed",   "Twin Blaster range increased from 300 to 420"),
+            ("changed",   "Plasma Cannon range increased from 380 to 520"),
+            ("changed",   "Tri-Laser range increased from 340 to 480"),
+            ("changed",   "Perk cards have received a visual overhaul."),
+            ("changed",   "Low Quality mode has received an overhaul, now adjusts quality in boss arenas and any new visuals to reduce performance costs."),
+        ],
+    },
+    {
         "version": "41.0",
         "date":    "20-03-2026",
         "changes": [
             ("changed",   "Vexara boss arena recieved a complete overhaul"),
-        ],
-    },
-    {
-        "version": "40.2",
-        "date":    "20-03-2026",
-        "changes": [
-            ("fixed",   "boss music not playing when closing shop during boss battle."),
-            ("changed",   "boss and regular battle music now pauses and resumes from where it left off if interrupted by the shop."),
         ],
     },
 ]
@@ -741,20 +850,21 @@ CREDITS = {
         "pixabay.com - xg7ssi08yr - laser",
     ],
     "Playtesters": [
-        "Empty!",
+        "kayleigh1w1",
+        "neptunecat1",
     ],
 }
 
 WEAPONS = [
     # fire_interval = frames between shots when holding mouse (at 60fps)
     {
-        "name": "Nail Gun",        "damage": 14,  "speed": 0.55, "range": 260,
+        "name": "Nail Gun",        "damage": 14,  "speed": 0.55, "range": 380,
         "cost": 0,    "req_lvl": 1,  "color": GRAY,
         "proj_size": 4,  "behaviour": "single",   "fire_interval": 12,
         "desc": "Fast reliable single shot",
     },
     {
-        "name": "Twin Blaster",    "damage": 18,  "speed": 0.50, "range": 300,
+        "name": "Twin Blaster",    "damage": 18,  "speed": 0.50, "range": 420,
         "cost": 80,   "req_lvl": 3,  "color": CYAN,
         "proj_size": 5,  "behaviour": "twin",     "fire_interval": 14,
         "desc": "Two parallel bolts",
@@ -766,13 +876,13 @@ WEAPONS = [
         "desc": "5-bullet spread, short range",
     },
     {
-        "name": "Plasma Cannon",   "damage": 70,  "speed": 0.44, "range": 380,
+        "name": "Plasma Cannon",   "damage": 70,  "speed": 0.44, "range": 520,
         "cost": 320,  "req_lvl": 7,  "color": (100, 80, 255),
         "proj_size": 12, "behaviour": "single",   "fire_interval": 32,
         "desc": "Massive high-damage bolt",
     },
     {
-        "name": "Tri-Laser",       "damage": 32,  "speed": 0.54, "range": 340,
+        "name": "Tri-Laser",       "damage": 32,  "speed": 0.54, "range": 480,
         "cost": 500,  "req_lvl": 10, "color": (0, 255, 180),
         "proj_size": 6,  "behaviour": "spread3",  "fire_interval": 16,
         "desc": "Three beams in a fan",
@@ -1001,6 +1111,50 @@ class GoldCoin:
                            max(1, self.radius // 3))
         pygame.draw.circle(surf, (180, 130, 0),(sx, bob_y), self.radius, 1)
 
+# ── HP Orb (health pickup dropped by enemies) ────────────────────────────────
+
+class HpOrb:
+    PICKUP_RADIUS = 32
+    BOB_SPEED     = 0.10
+
+    def __init__(self, x, y, amount):
+        self.x       = float(x)
+        self.y       = float(y)
+        self.amount  = amount
+        self.alive   = True
+        self.bob_t   = random.uniform(0, math.pi * 2)
+        angle        = random.uniform(0, math.pi * 2)
+        spd          = random.uniform(1.0, 2.5)
+        self.vx      = math.cos(angle) * spd
+        self.vy      = math.sin(angle) * spd
+        self.friction = 0.90
+
+    def update(self, player):
+        self.vx   *= self.friction
+        self.vy   *= self.friction
+        self.x    += self.vx
+        self.y    += self.vy
+        self.bob_t += self.BOB_SPEED
+        if math.hypot(self.x - player.x, self.y - player.y) < self.PICKUP_RADIUS:
+            player.hp  = min(player.max_hp, player.hp + self.amount)
+            self.alive = False
+
+    def draw(self, surf, cam):
+        sx    = int(self.x - cam[0])
+        bob_y = int(self.y - cam[1] + math.sin(self.bob_t) * 2.5)
+        r = 7
+        # Drop shadow
+        pygame.draw.ellipse(surf, (10, 10, 20),
+                            (sx - r, bob_y + r - 2, r * 2, r))
+        # Outer glow ring
+        pygame.draw.circle(surf, (120, 240, 120), (sx, bob_y), r + 2, 1)
+        # Body
+        pygame.draw.circle(surf, (50, 200, 70),  (sx, bob_y), r)
+        pygame.draw.circle(surf, (120, 255, 140), (sx, bob_y), r - 2)
+        # Bright specular highlight
+        pygame.draw.circle(surf, (220, 255, 220),
+                           (sx - r // 3, bob_y - r // 3), max(1, r // 3))
+
 # ── Particle ──────────────────────────────────────────────────────────────────
 
 class Particle:
@@ -1051,6 +1205,10 @@ class Projectile:
 
     def draw(self, surf, cam):
         sx = int(self.x - cam[0]); sy = int(self.y - cam[1])
+        # Low quality: skip glow surface allocation — plain streak + tip only
+        if GAME_SETTINGS.low:
+            pygame.draw.circle(surf, self.col, (sx, sy), self.size)
+            return
         # Draw as a streak: a line behind the bullet + bright tip
         speed  = math.hypot(self.vx, self.vy) or 1
         # Tail stretches 2.5× the bullet size behind travel direction
@@ -2622,8 +2780,8 @@ class Boss:
         if self.hp <= 0:
             self.hp    = 0
             self.alive = False
-        elif not self.enraged and self.hp / self.max_hp < self.ENRAGE_THRESHOLD:
-            self.enraged = True   # caller checks this for the announcement
+        elif not self.enraged and not getattr(self, '_pending_enrage', False) and self.hp / self.max_hp < self.ENRAGE_THRESHOLD:
+            self._pending_enrage = True   # game loop reads this and starts the anim
         # Vexara phase 2: split at 50% HP (primary only, once)
         if (self.pattern == "spiral" and not self.is_vex_clone
                 and not self.vex_split_done
@@ -2842,7 +3000,8 @@ class Boss:
                         self.seraph_dash_vy = perp_y * self.speed * 6.0
                     self.seraph_dash_timer = 16
                     self.seraph_dash_cd    = random.randint(
-                        int(75 * cd_mult), int(120 * cd_mult))
+                        int((140 if self.enraged else 75) * cd_mult),
+                        int((200 if self.enraged else 120) * cd_mult))
 
             # ── Shooting ──────────────────────────────────────────────────────
             self.atk_cd -= 1
@@ -3262,43 +3421,48 @@ class Boss:
                     if arr_r - ri > 0:
                         pygame.draw.circle(surf, arr_c, (sx, sy), arr_r - ri, 1)
 
-                # Afterimage at old position — solid faded circle
-                old_sx = int(self.vex_tp_old_x - cam[0])
-                old_sy = int(self.vex_tp_old_y - cam[1])
-                aft_c  = (min(255, int(self.color[0] * flash_t)),
-                          min(255, int(self.color[1] * flash_t)),
-                          min(255, int(self.color[2] * flash_t)))
-                after_r = self.size + 4
-                pygame.draw.circle(surf, aft_c, (old_sx, old_sy), after_r)
-                pygame.draw.circle(surf, (min(255, int(200 * flash_t)),) * 3,
-                                   (old_sx, old_sy), after_r, 2)
+                if not GAME_SETTINGS.low:
+                    # Afterimage at old position — solid faded circle
+                    old_sx = int(self.vex_tp_old_x - cam[0])
+                    old_sy = int(self.vex_tp_old_y - cam[1])
+                    aft_c  = (min(255, int(self.color[0] * flash_t)),
+                              min(255, int(self.color[1] * flash_t)),
+                              min(255, int(self.color[2] * flash_t)))
+                    after_r = self.size + 4
+                    pygame.draw.circle(surf, aft_c, (old_sx, old_sy), after_r)
+                    pygame.draw.circle(surf, (min(255, int(200 * flash_t)),) * 3,
+                                       (old_sx, old_sy), after_r, 2)
 
-            # Outer spinning hex dots — solid draws with a halo approximated by a larger dim circle
-            for i in range(6):
-                a = spin + (math.pi * 2 / 6) * i
-                rx = sx + int(math.cos(a) * (self.size + 10))
-                ry = sy + int(math.sin(a) * (self.size + 10))
-                dot_r = int(4 + math.sin(t * 0.006 + i) * 2)
-                halo_c = (max(0, ring_col[0] // 3), 0, max(0, ring_col[2] // 3))
-                pygame.draw.circle(surf, halo_c,  (rx, ry), dot_r + 3)
-                pygame.draw.circle(surf, ring_col, (rx, ry), dot_r)
+            if not GAME_SETTINGS.low:
+                # Outer spinning hex dots — solid draws with a halo approximated by a larger dim circle
+                for i in range(6):
+                    a = spin + (math.pi * 2 / 6) * i
+                    rx = sx + int(math.cos(a) * (self.size + 10))
+                    ry = sy + int(math.sin(a) * (self.size + 10))
+                    dot_r = int(4 + math.sin(t * 0.006 + i) * 2)
+                    halo_c = (max(0, ring_col[0] // 3), 0, max(0, ring_col[2] // 3))
+                    pygame.draw.circle(surf, halo_c,  (rx, ry), dot_r + 3)
+                    pygame.draw.circle(surf, ring_col, (rx, ry), dot_r)
 
-            # Inner counter-rotating triangle dots
-            for i in range(3):
-                a = spin2 + (math.pi * 2 / 3) * i
-                rx = sx + int(math.cos(a) * int(self.size * 0.6))
-                ry = sy + int(math.sin(a) * int(self.size * 0.6))
-                pygame.draw.circle(surf, ring_col2, (rx, ry), 3)
+                # Inner counter-rotating triangle dots
+                for i in range(3):
+                    a = spin2 + (math.pi * 2 / 3) * i
+                    rx = sx + int(math.cos(a) * int(self.size * 0.6))
+                    ry = sy + int(math.sin(a) * int(self.size * 0.6))
+                    pygame.draw.circle(surf, ring_col2, (rx, ry), 3)
 
-            # Pulsing outer glow ring — solid concentric rings, no Surface alloc
-            glow_r = self.size + 6 + int(pulse * 8)
-            for gi in range(3):
-                gr = glow_r - gi
-                if gr > 0:
-                    ga = max(0, int((40 + pulse * 40) * (1 - gi * 0.35)))
-                    gc = (max(0, ring_col[0] - gi * 15), 0, max(0, ring_col[2] - gi * 15))
-                    if ga > 6:
-                        pygame.draw.circle(surf, gc, (sx, sy), gr, 2)
+                # Pulsing outer glow ring — solid concentric rings, no Surface alloc
+                glow_r = self.size + 6 + int(pulse * 8)
+                for gi in range(3):
+                    gr = glow_r - gi
+                    if gr > 0:
+                        ga = max(0, int((40 + pulse * 40) * (1 - gi * 0.35)))
+                        gc = (max(0, ring_col[0] - gi * 15), 0, max(0, ring_col[2] - gi * 15))
+                        if ga > 6:
+                            pygame.draw.circle(surf, gc, (sx, sy), gr, 2)
+            else:
+                # Low quality: single pulsing border ring instead of all dots/halos
+                pygame.draw.circle(surf, ring_col, (sx, sy), self.size + 4, 2)
 
         # Inner ring + enraged pulse + outline (skipped for Nyxoth)
         if not _skip_standard_body:
@@ -3312,7 +3476,7 @@ class Boss:
 
         # Name plate above boss — font cached on first use
         if not hasattr(self, '_name_font'):
-            self._name_font = pygame.font.SysFont("consolas", 13, bold=True)
+            self._name_font = _make_font(13, bold=True)
         font_s  = self._name_font
         name_s  = font_s.render(self.name, True, WHITE)
         title_s = font_s.render(f"[ {self.title} ]", True, self.color)
@@ -3678,6 +3842,215 @@ class BossIntro:
         self._title_s.set_alpha(alpha)
         surf.blit(self._name_s,  (SW // 2 - self._name_s.get_width()  // 2, card_y + 18))
         surf.blit(self._title_s, (SW // 2 - self._title_s.get_width() // 2, card_y + 66))
+
+
+# ── Boss Enrage Animation ─────────────────────────────────────────────────────
+
+class BossEnrageAnim:
+    """
+    ~3-second cinematic that plays when a boss crosses the enrage threshold.
+    During this window the boss is frozen and invulnerable.
+
+    Phases (frames at 60 fps):
+      0–20  : world darkens quickly
+      20–80 : expanding shockwave rings + screen shake + cracks appear
+      60–140: "ENRAGED!" card slams in and holds
+      120–160: boss flashes white rapidly, shifts toward enrage tint
+      160–180: darkness fades out, boss resumes
+    Total: 180 frames = 3 seconds
+    """
+    TOTAL          = 180
+    DARK_IN        = 20
+    DARK_OUT_START = 160
+
+    def __init__(self, boss, fonts):
+        self.boss  = boss
+        self.fonts = fonts
+        self.frame = 0
+        self.done  = False
+
+        # Enrage tint — boss colour pushed toward angry red
+        self.enrage_col = lerp_color(boss.color, (255, 40, 40), 0.65)
+
+        # Pre-generate crack lines radiating from boss
+        self.cracks = []
+        for _ in range(10):
+            ang   = random.uniform(0, math.pi * 2)
+            pts   = [(float(boss.x), float(boss.y))]
+            cx2, cy2 = float(boss.x), float(boss.y)
+            segs  = random.randint(3, 5)
+            seg_l = random.randint(40, 140) / segs
+            for _ in range(segs):
+                ang  += random.uniform(-0.5, 0.5)
+                cx2  += math.cos(ang) * seg_l
+                cy2  += math.sin(ang) * seg_l
+                pts.append((cx2, cy2))
+            self.cracks.append(pts)
+
+        # Shockwave ring start frames
+        self.rings = [(20, self.enrage_col), (36, WHITE),
+                      (52, self.enrage_col), (68, (255, 255, 80))]
+
+        # Reusable surfaces
+        self._dark   = pygame.Surface((SW, SH), pygame.SRCALPHA)
+        self._shared = pygame.Surface((SW, SH), pygame.SRCALPHA)
+
+        # Pre-render text card (content never changes, only alpha/y)
+        enrage_txt = fonts["huge"].render("ENRAGED!", True, (255, 60, 60))
+        name_txt   = fonts["large"].render(boss.name, True, self.enrage_col)
+        cw = max(enrage_txt.get_width(), name_txt.get_width()) + 60
+        ch = 110
+        self._card       = pygame.Surface((cw, ch), pygame.SRCALPHA)
+        self._card_cw    = cw
+        self._card_ch    = ch
+        self._enrage_txt = enrage_txt
+        self._name_txt   = name_txt
+
+        # Screen-shake offsets (updated each frame)
+        self._shake_x = 0
+        self._shake_y = 0
+
+    def update(self):
+        self.frame += 1
+        if 20 <= self.frame <= 80:
+            intensity     = max(0, int(8 * (1 - (self.frame - 20) / 60)))
+            self._shake_x = random.randint(-intensity, intensity)
+            self._shake_y = random.randint(-intensity, intensity)
+        else:
+            self._shake_x = 0
+            self._shake_y = 0
+        if self.frame >= self.TOTAL:
+            self.done = True
+
+    @property
+    def active(self):
+        return not self.done
+
+    def draw(self, surf, cam, hud_draw_fn):
+        f  = self.frame
+        bx = int(self.boss.x - cam[0]) + self._shake_x
+        by = int(self.boss.y - cam[1]) + self._shake_y
+
+        # ── Darkness ──────────────────────────────────────────────────────────
+        if f < self.DARK_IN:
+            dark_alpha = int(170 * f / self.DARK_IN)
+        elif f < self.DARK_OUT_START:
+            dark_alpha = 170
+        else:
+            t          = (f - self.DARK_OUT_START) / (self.TOTAL - self.DARK_OUT_START)
+            dark_alpha = int(170 * (1 - t))
+        self._dark.fill((0, 0, 0, dark_alpha))
+        surf.blit(self._dark, (0, 0))
+
+        # ── Low quality: skip rings, cracks, glow — just body + card ─────────
+        if GAME_SETTINGS.low:
+            if f >= 20:
+                if 120 <= f < 160:
+                    body_col = WHITE if (f // 4) % 2 == 0 else self.enrage_col
+                else:
+                    fade_in  = min(1.0, (f - 20) / 40)
+                    body_col = lerp_color(self.boss.color, self.enrage_col, fade_in)
+                pygame.draw.circle(surf, body_col, (bx, by), self.boss.size)
+                pygame.draw.circle(surf, WHITE,    (bx, by), self.boss.size, 3)
+            if 60 <= f < self.DARK_OUT_START:
+                card_age = f - 60
+                slam_t   = min(1.0, card_age / 8)
+                card_y   = int(SH // 2 - 80 + (1 - slam_t) * (-160))
+                alpha    = min(255, card_age * 20)
+                cw, ch   = self._card_cw, self._card_ch
+                self._card.fill((0, 0, 0, min(200, alpha)))
+                pygame.draw.rect(self._card,
+                                 (*self.enrage_col, min(220, alpha)),
+                                 (0, 0, cw, ch), 3, border_radius=12)
+                surf.blit(self._card, (SW // 2 - cw // 2, card_y))
+                self._enrage_txt.set_alpha(alpha)
+                self._name_txt.set_alpha(alpha)
+                surf.blit(self._enrage_txt,
+                          (SW // 2 - self._enrage_txt.get_width() // 2, card_y + 14))
+                surf.blit(self._name_txt,
+                          (SW // 2 - self._name_txt.get_width()  // 2, card_y + 66))
+            hud_draw_fn()
+            return
+        self._dark.fill((0, 0, 0, dark_alpha))
+        surf.blit(self._dark, (0, 0))
+
+        # ── Shockwave rings ────────────────────────────────────────────────────
+        for start, col in self.rings:
+            age = f - start
+            if age < 0 or age > 60:
+                continue
+            t     = age / 60
+            r     = int(10 + t * 420)
+            width = max(2, int(10 * (1 - t)))
+            fade  = 1 - t
+            rc    = (max(0, int(col[0] * fade)),
+                     max(0, int(col[1] * fade)),
+                     max(0, int(col[2] * fade)))
+            if r > 0:
+                pygame.draw.circle(surf, rc, (bx, by), r, width)
+
+        # ── Ground cracks ──────────────────────────────────────────────────────
+        if f >= 20:
+            crack_t = min(1.0, (f - 20) / 30)
+            fade_t  = (1.0 if f < self.DARK_OUT_START else
+                       max(0.0, 1 - (f - self.DARK_OUT_START) /
+                                    (self.TOTAL - self.DARK_OUT_START)))
+            alpha   = int(220 * fade_t)
+            if alpha > 4:
+                self._shared.fill((0, 0, 0, 0))
+                for pts in self.cracks:
+                    visible    = max(2, int(len(pts) * crack_t))
+                    screen_pts = [(int(px - cam[0]) + self._shake_x,
+                                   int(py - cam[1]) + self._shake_y)
+                                  for px, py in pts[:visible]]
+                    if len(screen_pts) >= 2:
+                        pygame.draw.lines(self._shared,
+                                          (*self.enrage_col, alpha),
+                                          False, screen_pts, 2)
+                surf.blit(self._shared, (0, 0))
+
+        # ── Boss body ──────────────────────────────────────────────────────────
+        if f >= 20:
+            if 120 <= f < 160:
+                # Rapid white flash
+                body_col = WHITE if (f // 4) % 2 == 0 else self.enrage_col
+            else:
+                fade_in  = min(1.0, (f - 20) / 40)
+                body_col = lerp_color(self.boss.color, self.enrage_col, fade_in)
+
+            # Pulsing glow rings
+            pulse  = math.sin(f * 0.25) * 0.5 + 0.5
+            glow_r = self.boss.size + int(10 + pulse * 20)
+            for gi in range(4):
+                gr = glow_r - gi * 5
+                if gr > self.boss.size:
+                    gc2 = (max(0, self.enrage_col[0] - gi * 25),
+                           max(0, self.enrage_col[1] - gi * 25),
+                           max(0, self.enrage_col[2] - gi * 25))
+                    pygame.draw.circle(surf, gc2, (bx, by), gr, 2)
+            pygame.draw.circle(surf, body_col, (bx, by), self.boss.size)
+            pygame.draw.circle(surf, WHITE,    (bx, by), self.boss.size, 3)
+
+        # ── Text card ──────────────────────────────────────────────────────────
+        if 60 <= f < self.DARK_OUT_START:
+            card_age = f - 60
+            slam_t   = min(1.0, card_age / 8)
+            card_y   = int(SH // 2 - 80 + (1 - slam_t) * (-160))
+            alpha    = min(255, card_age * 20)
+            cw, ch   = self._card_cw, self._card_ch
+            self._card.fill((0, 0, 0, min(200, alpha)))
+            pygame.draw.rect(self._card,
+                             (*self.enrage_col, min(220, alpha)),
+                             (0, 0, cw, ch), 3, border_radius=12)
+            surf.blit(self._card, (SW // 2 - cw // 2, card_y))
+            self._enrage_txt.set_alpha(alpha)
+            self._name_txt.set_alpha(alpha)
+            surf.blit(self._enrage_txt,
+                      (SW // 2 - self._enrage_txt.get_width() // 2, card_y + 14))
+            surf.blit(self._name_txt,
+                      (SW // 2 - self._name_txt.get_width()  // 2, card_y + 66))
+
+        hud_draw_fn()
 
 
 def draw_token_coin(surf, cx, cy, r=8):
@@ -4339,9 +4712,17 @@ class Shop:
 # ── Perk Card Screen ──────────────────────────────────────────────────────────
 
 class PerkScreen:
-    CARD_W = 220
-    CARD_H = 280
-    GAP    = 30
+    CARD_W = 240
+    CARD_H = 360
+    GAP    = 40
+
+    # Per-card hover lift animation state: target and current float offset
+    _hover_offsets = [0.0, 0.0, 0.0]   # current y-lift (pixels, positive = up)
+    _hover_glows   = [0.0, 0.0, 0.0]   # current glow intensity 0.0-1.0
+    _entry_t       = 0.0                # 0→1, card entry animation progress
+
+    # Unique icon symbol per perk (matches ALL_PERKS order)
+    _ICONS = ["⚔", "🛡", "⚡", "❤", "💪", "💰", "🎯", "🔥", "💨"]
 
     def __init__(self, player, fonts):
         self.player  = player
@@ -4350,14 +4731,22 @@ class PerkScreen:
         self.cards   = []     # list of 3 perk dicts
         self.hovered = -1
         self.chosen  = False
+        self._hover_offsets = [0.0, 0.0, 0.0]
+        self._hover_glows   = [0.0, 0.0, 0.0]
+        self._entry_t       = 0.0
+        self._tick          = 0   # frame counter for shimmer / pulse
 
     def offer(self):
         """Pick 3 distinct random perks and show the screen."""
         pool = ALL_PERKS[:]
         random.shuffle(pool)
-        self.cards  = pool[:3]
-        self.active = True
-        self.chosen = False
+        self.cards          = pool[:3]
+        self.active         = True
+        self.chosen         = False
+        self._entry_t       = 0.0
+        self._hover_offsets = [0.0, 0.0, 0.0]
+        self._hover_glows   = [0.0, 0.0, 0.0]
+        self._tick          = 0
 
     def handle_event(self, event):
         if not self.active:
@@ -4386,81 +4775,360 @@ class PerkScreen:
         return start_x + idx * (self.CARD_W + self.GAP)
 
     def _card_at(self, mx, my):
-        cy = SH // 2 - self.CARD_H // 2
+        base_cy = SH // 2 - self.CARD_H // 2
         for i in range(3):
-            cx = self._card_x(i)
+            cx  = self._card_x(i)
+            cy  = base_cy - int(self._hover_offsets[i])
             if cx <= mx <= cx + self.CARD_W and cy <= my <= cy + self.CARD_H:
                 return i
         return -1
 
+    # ── helpers ──────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _draw_rounded_gradient(surf, rect, col_top, col_bot, radius=16):
+        """Fill a rounded rect with a vertical gradient using horizontal scanlines."""
+        x, y, w, h = rect
+        for row in range(h):
+            t   = row / max(h - 1, 1)
+            cr  = int(col_top[0] + (col_bot[0] - col_top[0]) * t)
+            cg  = int(col_top[1] + (col_bot[1] - col_top[1]) * t)
+            cb  = int(col_top[2] + (col_bot[2] - col_top[2]) * t)
+            # Clip scanline to rounded corners
+            if row < radius:
+                inset = radius - int(math.sqrt(max(0, radius*radius - (radius - row)**2)))
+            elif row >= h - radius:
+                rr = h - row - 1
+                inset = radius - int(math.sqrt(max(0, radius*radius - (radius - rr)**2)))
+            else:
+                inset = 0
+            pygame.draw.line(surf, (cr, cg, cb), (x + inset, y + row), (x + w - inset - 1, y + row))
+
+    @staticmethod
+    def _draw_outer_glow(surf, cx, cy, w, h, col, intensity, radius=20):
+        """Multi-layer translucent rect halo around a card."""
+        layers = 5
+        for k in range(layers, 0, -1):
+            expand = k * (radius // layers)
+            alpha  = int(intensity * 55 * (k / layers))
+            s = pygame.Surface((w + expand * 2, h + expand * 2), pygame.SRCALPHA)
+            pygame.draw.rect(s, (*col, alpha),
+                             (0, 0, w + expand * 2, h + expand * 2),
+                             border_radius=18 + expand)
+            surf.blit(s, (cx - expand, cy - expand))
+
+    @staticmethod
+    def _draw_inner_shadow(surf, cx, cy, w, h, col, radius=16):
+        """Subtle inner shadow at card top to give depth."""
+        s = pygame.Surface((w, 18), pygame.SRCALPHA)
+        for row in range(18):
+            alpha = int(80 * (1 - row / 18))
+            pygame.draw.line(s, (0, 0, 0, alpha), (0, row), (w, row))
+        surf.blit(s, (cx, cy + radius))
+
+    @staticmethod
+    def _draw_sparkle(surf, cx, cy, col, tick, seed):
+        """Draw 4 tiny rotating sparkle crosses around the icon area."""
+        rng = random.Random(seed)
+        for _ in range(4):
+            angle  = tick * 0.04 + rng.uniform(0, math.pi * 2)
+            dist   = rng.uniform(46, 58)
+            sx     = cx + int(math.cos(angle) * dist)
+            sy     = cy + int(math.sin(angle) * dist)
+            size   = rng.randint(2, 4)
+            alpha  = int(180 + 70 * math.sin(tick * 0.07 + rng.uniform(0, 3)))
+            for dx, dy in [(0, -size), (0, size), (-size, 0), (size, 0)]:
+                s = pygame.Surface((2, 2), pygame.SRCALPHA)
+                s.fill((*col, min(255, alpha)))
+                surf.blit(s, (sx + dx, sy + dy))
+
+    # ── main draw ─────────────────────────────────────────────────────────────
+
     def draw(self, surf):
         if not self.active:
             return
-        # Dim background
+
+        # ── Low quality: use the original flat-card design (no gradients/animations) ──
+        if GAME_SETTINGS.low:
+            overlay = pygame.Surface((SW, SH), pygame.SRCALPHA)
+            overlay.fill((0, 0, 0, 190))
+            surf.blit(overlay, (0, 0))
+
+            CW = 220; CH = 280; GAP = 30
+            total_w = CW * 3 + GAP * 2
+            start_x = SW // 2 - total_w // 2
+            cy = SH // 2 - CH // 2
+
+            title = self.fonts["huge"].render("CHOOSE A PERK", True, YELLOW)
+            surf.blit(title, (SW // 2 - title.get_width() // 2, cy - 64))
+            sub = self.fonts["small"].render("Click a card  or press  1 / 2 / 3", True, GRAY)
+            surf.blit(sub, (SW // 2 - sub.get_width() // 2, cy - 28))
+
+            for i, perk in enumerate(self.cards):
+                cx      = start_x + i * (CW + GAP)
+                hovered = (i == self.hovered)
+                col     = perk["color"]
+
+                bg = lerp_color(PANEL, col, 0.12 if hovered else 0.04)
+                pygame.draw.rect(surf, bg, (cx, cy, CW, CH), border_radius=14)
+                border_col = col if hovered else lerp_color(GRAY, col, 0.4)
+                pygame.draw.rect(surf, border_col, (cx, cy, CW, CH),
+                                 3 if hovered else 1, border_radius=14)
+
+                if hovered:
+                    glow_s = pygame.Surface((CW + 20, CH + 20), pygame.SRCALPHA)
+                    pygame.draw.rect(glow_s, (*col, 40), (0, 0, CW + 20, CH + 20), border_radius=18)
+                    surf.blit(glow_s, (cx - 10, cy - 10))
+
+                icon_cy = cy + 72
+                pygame.draw.circle(surf, lerp_color(DARK, col, 0.3), (cx + CW // 2, icon_cy), 44)
+                pygame.draw.circle(surf, col, (cx + CW // 2, icon_cy), 44, 2)
+                icon_ltr = self.fonts["huge"].render(perk["label"][0], True, col)
+                surf.blit(icon_ltr, (cx + CW // 2 - icon_ltr.get_width() // 2,
+                                     icon_cy - icon_ltr.get_height() // 2))
+
+                name = self.fonts["large"].render(perk["label"], True, WHITE)
+                surf.blit(name, (cx + CW // 2 - name.get_width() // 2, cy + 132))
+
+                desc = self.fonts["small"].render(perk["desc"], True, col)
+                surf.blit(desc, (cx + CW // 2 - desc.get_width() // 2, cy + 166))
+
+                stacks     = int(self.player.perk(perk["key"]) / perk["bonus"] + 0.5)
+                future_val = self.player.perk(perk["key"]) + perk["bonus"]
+                if perk["key"] == "hp_regen":
+                    future_str = f"Total: +{int(future_val)} HP/3s"
+                else:
+                    future_str = f"Total: +{int(future_val * 100)}%"
+                if stacks > 0:
+                    st_txt = self.fonts["tiny"].render(f"Owned: {stacks}x  |  {future_str}", True, lerp_color(GRAY, col, 0.5))
+                else:
+                    st_txt = self.fonts["tiny"].render(future_str, True, lerp_color(GRAY, col, 0.5))
+                surf.blit(st_txt, (cx + CW // 2 - st_txt.get_width() // 2, cy + 194))
+
+                key_hint = self.fonts["med"].render(f"[{i+1}]", True, GRAY if not hovered else YELLOW)
+                surf.blit(key_hint, (cx + CW // 2 - key_hint.get_width() // 2, cy + CH - 36))
+            return
+
+        self._tick += 1
+
+        # ── Animate entry (cards drop in from above over ~20 frames) ──────────
+        self._entry_t = min(1.0, self._entry_t + 0.055)
+        # Ease-out cubic
+        et = 1.0 - (1.0 - self._entry_t) ** 3
+
+        # ── Animate hover lift / glow ─────────────────────────────────────────
+        LIFT_TARGET = 16.0
+        for i in range(3):
+            want_lift = LIFT_TARGET if i == self.hovered else 0.0
+            want_glow = 1.0         if i == self.hovered else 0.0
+            self._hover_offsets[i] += (want_lift - self._hover_offsets[i]) * 0.18
+            self._hover_glows[i]   += (want_glow - self._hover_glows[i])   * 0.18
+
+        # ── Dimmed background overlay ─────────────────────────────────────────
         overlay = pygame.Surface((SW, SH), pygame.SRCALPHA)
-        overlay.fill((0, 0, 0, 190))
+        overlay.fill((0, 0, 10, 210))
         surf.blit(overlay, (0, 0))
 
-        # Title
-        title = self.fonts["huge"].render("CHOOSE A PERK", True, YELLOW)
-        surf.blit(title, (SW // 2 - title.get_width() // 2, SH // 2 - self.CARD_H // 2 - 64))
-        sub = self.fonts["small"].render("Click a card  or press  1 / 2 / 3", True, GRAY)
-        surf.blit(sub, (SW // 2 - sub.get_width() // 2, SH // 2 - self.CARD_H // 2 - 28))
+        # ── Subtle radial vignette ────────────────────────────────────────────
+        vign = pygame.Surface((SW, SH), pygame.SRCALPHA)
+        cx_v, cy_v = SW // 2, SH // 2
+        for radius in range(420, 0, -30):
+            alpha = max(0, int(60 * (1 - radius / 420)))
+            pygame.draw.circle(vign, (0, 0, 0, alpha), (cx_v, cy_v), radius)
+        surf.blit(vign, (0, 0))
 
-        cy = SH // 2 - self.CARD_H // 2
+        # ── Title section ────────────────────────────────────────────────────
+        title_y    = SH // 2 - self.CARD_H // 2 - 80
+        pulse      = 0.5 + 0.5 * math.sin(self._tick * 0.05)
+        title_col  = lerp_color(YELLOW, WHITE, pulse * 0.3)
+
+        # Title glow halo
+        glow_surf = pygame.Surface((500, 70), pygame.SRCALPHA)
+        pygame.draw.ellipse(glow_surf, (*YELLOW, 18), (0, 0, 500, 70))
+        surf.blit(glow_surf, (SW // 2 - 250, title_y - 10))
+
+        title = self.fonts["huge"].render("✦  CHOOSE A PERK  ✦", True, title_col)
+        surf.blit(title, (SW // 2 - title.get_width() // 2, title_y))
+
+        sub = self.fonts["small"].render("Click a card  ·  or press  1 / 2 / 3", True, (130, 130, 150))
+        surf.blit(sub, (SW // 2 - sub.get_width() // 2, title_y + 46))
+
+        # ── Horizontal rule under title ───────────────────────────────────────
+        rule_y = title_y + 66
+        pygame.draw.line(surf, (60, 60, 80), (SW // 2 - 260, rule_y), (SW // 2 + 260, rule_y), 1)
+
+        # ── Cards ─────────────────────────────────────────────────────────────
+        base_cy = SH // 2 - self.CARD_H // 2
+
         for i, perk in enumerate(self.cards):
-            cx      = self._card_x(i)
-            hovered = (i == self.hovered)
-            col     = perk["color"]
+            col      = perk["color"]
+            hovered  = (i == self.hovered)
+            glow_int = self._hover_glows[i]
 
-            # Card background
-            bg = lerp_color(PANEL, col, 0.12 if hovered else 0.04)
-            pygame.draw.rect(surf, bg, (cx, cy, self.CARD_W, self.CARD_H), border_radius=14)
-            border_col = col if hovered else lerp_color(GRAY, col, 0.4)
-            pygame.draw.rect(surf, border_col, (cx, cy, self.CARD_W, self.CARD_H),
-                             3 if hovered else 1, border_radius=14)
+            # Entry animation: cards start 80px above final position
+            entry_offset = int((1.0 - et) * (80 + i * 20))
+            lift_offset  = int(self._hover_offsets[i])
+            cx  = self._card_x(i)
+            cy  = base_cy - lift_offset - entry_offset
 
-            # Glow on hover
-            if hovered:
-                glow_s = pygame.Surface((self.CARD_W + 20, self.CARD_H + 20), pygame.SRCALPHA)
-                pygame.draw.rect(glow_s, (*col, 40), (0, 0, self.CARD_W + 20, self.CARD_H + 20),
-                                 border_radius=18)
-                surf.blit(glow_s, (cx - 10, cy - 10))
+            # Entry alpha fade-in (stagger by card index)
+            entry_alpha_t = min(1.0, max(0.0, self._entry_t * 3.0 - i * 0.5))
+            card_alpha    = int(255 * entry_alpha_t)
+            if card_alpha <= 0:
+                continue
 
-            # Big icon circle
-            icon_cy = cy + 72
-            pygame.draw.circle(surf, lerp_color(DARK, col, 0.3), (cx + self.CARD_W // 2, icon_cy), 44)
-            pygame.draw.circle(surf, col,  (cx + self.CARD_W // 2, icon_cy), 44, 2)
-            # Draw first letter of label as the icon
-            icon_ltr = self.fonts["huge"].render(perk["label"][0], True, col)
-            surf.blit(icon_ltr, (cx + self.CARD_W // 2 - icon_ltr.get_width() // 2,
-                                 icon_cy - icon_ltr.get_height() // 2))
+            # ── Outer glow halo ───────────────────────────────────────────────
+            if glow_int > 0.02:
+                self._draw_outer_glow(surf, cx, cy, self.CARD_W, self.CARD_H,
+                                      col, glow_int * entry_alpha_t)
 
-            # Perk name
-            name = self.fonts["large"].render(perk["label"], True, WHITE)
-            surf.blit(name, (cx + self.CARD_W // 2 - name.get_width() // 2, cy + 132))
+            # ── Card body: dark gradient background ───────────────────────────
+            card_surf = pygame.Surface((self.CARD_W, self.CARD_H), pygame.SRCALPHA)
+            col_top = lerp_color((22, 22, 36), col, 0.08 + glow_int * 0.06)
+            col_bot = lerp_color((12, 12, 20), col, 0.03 + glow_int * 0.03)
+            self._draw_rounded_gradient(card_surf,
+                                        (0, 0, self.CARD_W, self.CARD_H),
+                                        col_top, col_bot, radius=16)
+            card_surf.set_alpha(card_alpha)
+            surf.blit(card_surf, (cx, cy))
 
-            # Description
-            desc = self.fonts["small"].render(perk["desc"], True, col)
-            surf.blit(desc, (cx + self.CARD_W // 2 - desc.get_width() // 2, cy + 166))
+            # ── Coloured header band ──────────────────────────────────────────
+            band_h  = 96
+            band_s  = pygame.Surface((self.CARD_W, band_h), pygame.SRCALPHA)
+            band_top = lerp_color(col, WHITE, 0.12)
+            band_bot = lerp_color(col, (10, 10, 18), 0.85)
+            self._draw_rounded_gradient(band_s,
+                                        (0, 0, self.CARD_W, band_h),
+                                        band_top, band_bot, radius=16)
+            # Clip bottom of band to straight edge
+            pygame.draw.rect(band_s, (0, 0, 0, 0), (0, band_h - 4, self.CARD_W, 4))
+            band_s.set_alpha(card_alpha)
+            surf.blit(band_s, (cx, cy))
 
-            # Stacks owned + preview of total after picking
-            stacks     = int(self.player.perk(perk["key"]) / perk["bonus"] + 0.5)
+            # ── Inner shadow below header band ────────────────────────────────
+            self._draw_inner_shadow(surf, cx, cy + band_h, self.CARD_W, 18, col)
+
+            # ── Card border ───────────────────────────────────────────────────
+            border_col   = lerp_color(lerp_color(GRAY, col, 0.5), WHITE, glow_int * 0.4)
+            border_width = 2 if hovered else 1
+            border_surf  = pygame.Surface((self.CARD_W, self.CARD_H), pygame.SRCALPHA)
+            pygame.draw.rect(border_surf, (*border_col, card_alpha),
+                             (0, 0, self.CARD_W, self.CARD_H),
+                             border_width, border_radius=16)
+            surf.blit(border_surf, (cx, cy))
+
+            # ── Top-edge shine line ───────────────────────────────────────────
+            shine_alpha = int((80 + glow_int * 100) * entry_alpha_t)
+            shine_surf  = pygame.Surface((self.CARD_W - 40, 2), pygame.SRCALPHA)
+            for px in range(self.CARD_W - 40):
+                t  = px / (self.CARD_W - 40)
+                fa = int(shine_alpha * math.sin(t * math.pi))
+                pygame.draw.line(shine_surf, (255, 255, 255, fa), (px, 0), (px, 1))
+            surf.blit(shine_surf, (cx + 20, cy + 2))
+
+            # ── Icon badge ────────────────────────────────────────────────────
+            icon_cx = cx + self.CARD_W // 2
+            icon_cy = cy + 52
+
+            # Outer ring shadow
+            shadow_s = pygame.Surface((100, 100), pygame.SRCALPHA)
+            pygame.draw.circle(shadow_s, (0, 0, 0, 80), (52, 54), 40)
+            surf.blit(shadow_s, (icon_cx - 52, icon_cy - 52))
+
+            # Outer ring
+            ring_col = lerp_color(col, WHITE, 0.25 + glow_int * 0.25)
+            pygame.draw.circle(surf, lerp_color(DARK, col, 0.5), (icon_cx, icon_cy), 38)
+            pygame.draw.circle(surf, ring_col, (icon_cx, icon_cy), 38, 2)
+
+            # Inner fill
+            inner_col = lerp_color((20, 20, 30), col, 0.30 + glow_int * 0.15)
+            pygame.draw.circle(surf, inner_col, (icon_cx, icon_cy), 34)
+
+            # Sparkles on hover
+            if glow_int > 0.1:
+                self._draw_sparkle(surf, icon_cx, icon_cy, col, self._tick, seed=i * 999)
+
+            # Icon letter (large, centred, bright)
+            icon_bright = lerp_color(col, WHITE, 0.5 + glow_int * 0.3)
+            icon_surf   = self.fonts["huge"].render(perk["label"][0], True, icon_bright)
+            surf.blit(icon_surf, (icon_cx - icon_surf.get_width() // 2,
+                                  icon_cy - icon_surf.get_height() // 2))
+
+            # ── Divider ───────────────────────────────────────────────────────
+            div_y = cy + band_h + 14
+            div_s = pygame.Surface((self.CARD_W - 32, 1), pygame.SRCALPHA)
+            for px in range(self.CARD_W - 32):
+                t  = px / (self.CARD_W - 32)
+                fa = int(60 * math.sin(t * math.pi))
+                pygame.draw.line(div_s, (*col, fa), (px, 0), (px, 0))
+            surf.blit(div_s, (cx + 16, div_y))
+
+            # ── Perk name ─────────────────────────────────────────────────────
+            name_col  = lerp_color(WHITE, col, 0.15 + glow_int * 0.1)
+            name_surf = self.fonts["large"].render(perk["label"], True, name_col)
+            surf.blit(name_surf, (icon_cx - name_surf.get_width() // 2, cy + 110))
+
+            # ── Description ───────────────────────────────────────────────────
+            desc_col  = lerp_color((160, 160, 175), col, 0.45)
+            desc_surf = self.fonts["small"].render(perk["desc"], True, desc_col)
+            surf.blit(desc_surf, (icon_cx - desc_surf.get_width() // 2, cy + 144))
+
+            # ── Stack pips row ────────────────────────────────────────────────
+            stacks    = int(self.player.perk(perk["key"]) / perk["bonus"] + 0.5)
+            max_pips  = 5
+            pip_r     = 5
+            pip_gap   = 14
+            pip_total = max_pips * (pip_r * 2) + (max_pips - 1) * (pip_gap - pip_r * 2)
+            pip_sx    = icon_cx - pip_total // 2
+            pip_y     = cy + 180
+
+            for p in range(max_pips):
+                px = pip_sx + p * pip_gap
+                filled = p < stacks
+                if filled:
+                    pygame.draw.circle(surf, col, (px, pip_y), pip_r)
+                    pygame.draw.circle(surf, lerp_color(col, WHITE, 0.5), (px, pip_y), pip_r, 1)
+                else:
+                    pygame.draw.circle(surf, (40, 40, 58), (px, pip_y), pip_r)
+                    pygame.draw.circle(surf, (65, 65, 85), (px, pip_y), pip_r, 1)
+
+            # Stack label
+            if stacks > 0:
+                st_label = self.fonts["tiny"].render(f"Owned: {stacks}×", True,
+                                                     lerp_color((100, 100, 115), col, 0.6))
+                surf.blit(st_label, (icon_cx - st_label.get_width() // 2, pip_y + 10))
+
+            # ── Future total preview ──────────────────────────────────────────
             future_val = self.player.perk(perk["key"]) + perk["bonus"]
             if perk["key"] == "hp_regen":
-                future_str = f"Total: +{int(future_val)} HP/3s"
+                future_str = f"+{int(future_val)} HP / 3s after pick"
             else:
-                future_str = f"Total: +{int(future_val * 100)}%"
-            if stacks > 0:
-                st_txt = self.fonts["tiny"].render(f"Owned: {stacks}x  |  {future_str}", True, lerp_color(GRAY, col, 0.5))
-            else:
-                st_txt = self.fonts["tiny"].render(future_str, True, lerp_color(GRAY, col, 0.5))
-            surf.blit(st_txt, (cx + self.CARD_W // 2 - st_txt.get_width() // 2, cy + 194))
+                future_str = f"+{int(future_val * 100)}%  after pick"
+            fv_col  = lerp_color((120, 120, 135), col, 0.55)
+            fv_surf = self.fonts["tiny"].render(future_str, True, fv_col)
+            surf.blit(fv_surf, (icon_cx - fv_surf.get_width() // 2, cy + 208))
 
-            # Key hint
-            key_hint = self.fonts["med"].render(f"[{i+1}]", True, GRAY if not hovered else YELLOW)
-            surf.blit(key_hint, (cx + self.CARD_W // 2 - key_hint.get_width() // 2,
-                                 cy + self.CARD_H - 36))
+            # ── Horizontal rule before footer ─────────────────────────────────
+            rule2_y = cy + self.CARD_H - 52
+            rule2_s = pygame.Surface((self.CARD_W - 24, 1), pygame.SRCALPHA)
+            for px in range(self.CARD_W - 24):
+                t  = px / (self.CARD_W - 24)
+                fa = int(40 * math.sin(t * math.pi))
+                pygame.draw.line(rule2_s, (180, 180, 200, fa), (px, 0), (px, 0))
+            surf.blit(rule2_s, (cx + 12, rule2_y))
+
+            # ── Key badge footer ──────────────────────────────────────────────
+            badge_w, badge_h = 52, 26
+            badge_x = icon_cx - badge_w // 2
+            badge_y = cy + self.CARD_H - 38
+            badge_bg  = lerp_color((30, 30, 45), col, 0.25 + glow_int * 0.2)
+            badge_bdr = lerp_color((80, 80, 100), col, 0.6 + glow_int * 0.3)
+            pygame.draw.rect(surf, badge_bg,  (badge_x, badge_y, badge_w, badge_h), border_radius=8)
+            pygame.draw.rect(surf, badge_bdr, (badge_x, badge_y, badge_w, badge_h), 1, border_radius=8)
+            key_col  = lerp_color(GRAY, YELLOW, glow_int)
+            key_surf = self.fonts["med"].render(f" {i+1} ", True, key_col)
+            surf.blit(key_surf, (icon_cx - key_surf.get_width() // 2,
+                                 badge_y + badge_h // 2 - key_surf.get_height() // 2))
 
 # ── Username entry screen ─────────────────────────────────────────────────────
 
@@ -4468,7 +5136,7 @@ def is_first_run():
     """Returns True and marks as seen if this is the first ever play press."""
     if not os.path.isfile(FIRST_RUN_FILE):
         try:
-            with open(FIRST_RUN_FILE, "w") as f:
+            with open(FIRST_RUN_FILE, "w", encoding="utf-8") as f:
                 json.dump({"seen_tutorial": True}, f)
         except Exception:
             pass
@@ -4557,6 +5225,7 @@ def username_screen(screen, clock, fonts):
     pn_rect       = pygame.Rect(0, 0, 1, 1)
     settings_rect = pygame.Rect(0, 0, 1, 1)
     credits_rect  = pygame.Rect(0, 0, 1, 1)
+    update_rect   = pygame.Rect(0, 0, 1, 1)   # clickable download button in update strip
     close_rect    = pygame.Rect(SW - 48, 8, 36, 36)
     play_rect     = None
 
@@ -4690,7 +5359,9 @@ def username_screen(screen, clock, fonts):
                 if close_rect.collidepoint(px, py):
                     if menu_video[0]: menu_video[0].release()
                     pygame.quit(); sys.exit()
-                if lb_rect.collidepoint(px, py):
+                if update_rect.collidepoint(px, py) and _update_info.get("url"):
+                    webbrowser.open(_update_info["url"])
+                elif lb_rect.collidepoint(px, py):
                     show_lb = True
                 elif pn_rect.collidepoint(px, py):
                     show_patchnotes = True
@@ -4765,7 +5436,7 @@ def username_screen(screen, clock, fonts):
         TITLE_COL   = (180, 60, 220)   # purple
         title       = fonts["huge"].render(TITLE_TEXT, True, TITLE_COL)
         title_x     = SW // 2 - title.get_width() // 2
-        title_y     = 108
+        title_y     = 120
         title_bot   = title_y + title.get_height()
 
         if not GAME_SETTINGS.low:
@@ -5186,17 +5857,6 @@ def username_screen(screen, clock, fonts):
         ver_menu = fonts["tiny"].render(GAME_VERSION, True, (55, 55, 70))
         screen.blit(ver_menu, (SW // 2 - ver_menu.get_width() // 2, SH - 18))
 
-        # Red X close button — top right corner
-        mx_now2, my_now2 = pygame.mouse.get_pos()
-        x_hovered = close_rect.collidepoint(mx_now2, my_now2)
-        x_bg  = (180, 30, 30) if x_hovered else (100, 20, 20)
-        x_brd = (255, 80, 80) if x_hovered else (160, 40, 40)
-        pygame.draw.rect(screen, x_bg,  close_rect, border_radius=6)
-        pygame.draw.rect(screen, x_brd, close_rect, 1, border_radius=6)
-        cx2 = close_rect.centerx; cy2 = close_rect.centery; arm = 8
-        pygame.draw.line(screen, (255, 120, 120), (cx2 - arm, cy2 - arm), (cx2 + arm, cy2 + arm), 2)
-        pygame.draw.line(screen, (255, 120, 120), (cx2 + arm, cy2 - arm), (cx2 - arm, cy2 + arm), 2)
-
         # ── Tutorial overlay ──────────────────────────────────────────────────
         if show_tutorial:
             TW, TH = 720, 480
@@ -5288,6 +5948,54 @@ def username_screen(screen, clock, fonts):
                 "◄/► or A/D to navigate  |  ENTER on last page to start", True, GRAY)
             screen.blit(hint_t, (TX + TW // 2 - hint_t.get_width() // 2, TY + TH - 16))
 
+        # ── Top strip — drawn absolutely last so nothing can paint over it ───────
+        STRIP_H = 34
+        update_available = (
+            _update_info.get("version") and
+            _update_info["version"] != GAME_VERSION
+        )
+
+        # Always draw the bar — amber when update waiting, dark when up to date
+        if update_available:
+            pygame.draw.rect(screen, (150, 112, 0), (0, 0, SW, STRIP_H))
+            pygame.draw.rect(screen, (220, 170, 0), (0, STRIP_H - 1, SW, 1))
+        else:
+            pygame.draw.rect(screen, (14, 14, 22),  (0, 0, SW, STRIP_H))
+            pygame.draw.rect(screen, (35, 35, 52),  (0, STRIP_H - 1, SW, 1))
+
+        if update_available:
+            pre_tag   = "  (pre-release)" if _update_info.get("prerelease") else ""
+            ver_txt   = f"Update available:  v{_update_info['version']}{pre_tag}"
+            notes_txt = (f"  —  {_update_info['notes']}" if _update_info.get("notes") else "")
+            info_surf = fonts["small"].render(ver_txt + notes_txt, True, (255, 240, 180))
+            screen.blit(info_surf, (12, STRIP_H // 2 - info_surf.get_height() // 2))
+
+            # Download button — sits left of the X close button
+            btn_label = fonts["small"].render("Download", True, (20, 14, 0))
+            btn_w     = btn_label.get_width() + 24
+            btn_h     = STRIP_H - 8
+            btn_x     = SW - btn_w - 52
+            btn_y     = 4
+            update_rect = pygame.Rect(btn_x, btn_y, btn_w, btn_h)
+            mx_u, my_u  = pygame.mouse.get_pos()
+            btn_bg      = (255, 220, 60) if update_rect.collidepoint(mx_u, my_u) else (200, 162, 20)
+            pygame.draw.rect(screen, btn_bg,         update_rect, border_radius=5)
+            pygame.draw.rect(screen, (255, 230, 80), update_rect, 1, border_radius=5)
+            screen.blit(btn_label, (btn_x + 12,
+                                    STRIP_H // 2 - btn_label.get_height() // 2))
+        else:
+            update_rect = pygame.Rect(0, 0, 1, 1)   # never hit
+
+        # X close button — always visible in top-right corner of the strip
+        x_hovered = close_rect.collidepoint(*pygame.mouse.get_pos())
+        x_bg  = (180, 30, 30) if x_hovered else (100, 20, 20)
+        x_brd = (255, 80, 80) if x_hovered else (160, 40, 40)
+        pygame.draw.rect(screen, x_bg,  close_rect, border_radius=6)
+        pygame.draw.rect(screen, x_brd, close_rect, 1, border_radius=6)
+        cx2 = close_rect.centerx; cy2 = close_rect.centery; arm = 8
+        pygame.draw.line(screen, (255, 120, 120), (cx2 - arm, cy2 - arm), (cx2 + arm, cy2 + arm), 2)
+        pygame.draw.line(screen, (255, 120, 120), (cx2 + arm, cy2 - arm), (cx2 - arm, cy2 + arm), 2)
+
         pygame.display.flip()
 
 # ── Main Game ─────────────────────────────────────────────────────────────────
@@ -5296,16 +6004,16 @@ class Game:
     def __init__(self, username="Player"):
         self.screen   = pygame.display.set_mode((SW, SH))
         self._overlay = pygame.Surface((SW, SH), pygame.SRCALPHA)  # reused every frame
-        pygame.display.set_caption("Dungeon Crawler 41.0b2")
+        pygame.display.set_caption("Dungeon Crawler 42.0b14")
         self.clock    = pygame.time.Clock()
         self.world_w  = 3000; self.world_h = 3000
         self.username = username
         self.fonts    = {
-            "large": pygame.font.SysFont("consolas", 28, bold=True),
-            "med":   pygame.font.SysFont("consolas", 20, bold=True),
-            "small": pygame.font.SysFont("consolas", 15),
-            "tiny":  pygame.font.SysFont("consolas", 13),
-            "huge":  pygame.font.SysFont("consolas", 48, bold=True),
+            "large": _make_font(28, bold=True),
+            "med":   _make_font(20, bold=True),
+            "small": _make_font(15),
+            "tiny":  _make_font(13),
+            "huge":  _make_font(48, bold=True),
         }
         self.leaderboard = Leaderboard()
         self.lb_rank     = None   # rank achieved this run (set on death)
@@ -5320,6 +6028,7 @@ class Game:
         self.floating_texts = []
         self.gold_coins     = []
         self.fire_orbs      = []
+        self.hp_orbs        = []
         self.shop           = Shop()
         self.perk_screen    = PerkScreen(self.player, self.fonts)
         self.game_over      = False
@@ -5336,6 +6045,7 @@ class Game:
         self.boss           = None
         self.boss_clone     = None   # Vexara phase-2 clone
         self.boss_intro     = None   # BossIntro cinematic, None when inactive
+        self.enrage_anim    = None   # BossEnrageAnim cinematic, None when inactive
         self.boss_wave      = False   # True while boss is alive this wave
         self.boss_pool      = list(range(len(BOSS_TYPES)))
         random.shuffle(self.boss_pool)
@@ -5572,11 +6282,17 @@ class Game:
         # Clear all lingering enemy projectiles so the player can't be hit after the kill
         self.projectiles = [p for p in self.projectiles if p.owner == "player"]
         self.fire_orbs   = []
+        self.hp_orbs     = []
         MUSIC.play("battle")
         SOUNDS.play("boss_death")
         # Big gold + XP reward
         for _ in range(12):
             self.gold_coins.append(GoldCoin(b.x, b.y, b.gold_drop // 12))
+        # Boss HP orbs — scatter 3–5 orbs worth 20 HP each
+        for _ in range(random.randint(3, 5)):
+            ox = random.uniform(-60, 60)
+            oy = random.uniform(-60, 60)
+            self.hp_orbs.append(HpOrb(b.x + ox, b.y + oy, 20))
         self.floating_texts.append(
             FloatingText(b.x, b.y - 60, f"BOSS SLAIN! +{b.gold_drop}g", YELLOW, 26))
         self.floating_texts.append(
@@ -5778,116 +6494,125 @@ class Game:
             acx   = int(self.world_w // 2 - cam[0])   # arena centre screen-x
             acy   = int(self.world_h // 2 - cam[1])   # arena centre screen-y
 
-            # ── Hex tile grid (flat-top hexagons) ─────────────────────────────
-            hex_s  = 44
-            col_w  = int(hex_s * 1.5)              # 66 px centre-to-centre horizontally
-            row_h  = int(hex_s * 0.8660 * 2)       # ≈76 px centre-to-centre vertically
-            half_r = row_h // 2
+            if GAME_SETTINGS.low:
+                # Low quality: skip hex polygon grid entirely; draw static cracks
+                # and a minimal summoning circle — no per-frame trig per tile
+                for crack_pts in self.vex_cracks:
+                    s_pts = [(int(wx - cam[0]), int(wy - cam[1])) for wx, wy in crack_pts]
+                    if not any(-60 < sx < SW + 60 and -60 < sy < SH + 60 for sx, sy in s_pts):
+                        continue
+                    if len(s_pts) >= 2:
+                        pygame.draw.lines(self.screen, (80, 0, 140), False, s_pts, 1)
+                if -360 < acx < SW + 360 and -360 < acy < SH + 360:
+                    for rr in (150, 210, 270, 340):
+                        pygame.draw.circle(self.screen, (55, 0, 100), (acx, acy), rr, 1)
+                    pygame.draw.circle(self.screen, (48, 0, 88),  (acx, acy), 90, 2)
+                    pygame.draw.circle(self.screen, (12, 0, 24),  (acx, acy), 14)
+            else:
+                # ── Hex tile grid (flat-top hexagons) ─────────────────────────
+                hex_s  = 44
+                col_w  = int(hex_s * 1.5)              # 66 px centre-to-centre horizontally
+                row_h  = int(hex_s * 0.8660 * 2)       # ≈76 px centre-to-centre vertically
+                half_r = row_h // 2
 
-            gc_start = cam[0] // col_w - 1
-            gc_end   = (cam[0] + SW) // col_w + 2
-            gr_start = cam[1] // row_h - 1
-            gr_end   = (cam[1] + SH) // row_h + 2
+                gc_start = cam[0] // col_w - 1
+                gc_end   = (cam[0] + SW) // col_w + 2
+                gr_start = cam[1] // row_h - 1
+                gr_end   = (cam[1] + SH) // row_h + 2
 
-            for gc in range(gc_start, gc_end):
-                for gr in range(gr_start, gr_end):
-                    hcx = gc * col_w - cam[0]
-                    hcy = gr * row_h + (half_r if gc % 2 else 0) - cam[1]
-                    if -hex_s * 2 < hcx < SW + hex_s * 2 and -hex_s * 2 < hcy < SH + hex_s * 2:
-                        shade    = (gc * 7 + gr * 13) % 6
-                        glow_hex = (gc * 11 + gr * 17) % 22 == 0   # ~1 in 22 hexes glows
-                        crack_hex= (gc * 5  + gr * 19) % 15 == 0   # fractured hex variant
-                        if glow_hex:
-                            tc = (42, 8, 78)     # corruption-glow hex
-                        elif crack_hex:
-                            tc = (30, 6, 56)     # fractured darker
-                        elif shade < 2:
-                            tc = (18, 7, 32)     # darkest base
-                        elif shade < 4:
-                            tc = (22, 10, 40)    # mid base
-                        else:
-                            tc = (26, 13, 48)    # slightly lighter
-                        pts = [(hcx + int(math.cos(math.pi / 3 * i) * hex_s),
-                                hcy + int(math.sin(math.pi / 3 * i) * hex_s))
-                               for i in range(6)]
-                        pygame.draw.polygon(self.screen, tc, pts)
-                        # Outline — glowing hexes get a brighter void-purple edge
-                        edge_col = (68, 18, 118) if glow_hex else (34, 14, 60)
-                        pygame.draw.polygon(self.screen, edge_col, pts, 1)
-                        # Fractured hexes: draw a jagged crack line across them
-                        if crack_hex:
-                            ca = (gc * 3 + gr * 7) % 6   # pick a random axis
-                            cx1h = hcx + int(math.cos(math.pi / 3 * ca) * (hex_s - 8))
-                            cy1h = hcy + int(math.sin(math.pi / 3 * ca) * (hex_s - 8))
-                            cx2h = hcx + int(math.cos(math.pi / 3 * ((ca + 3) % 6)) * (hex_s - 8))
-                            cy2h = hcy + int(math.sin(math.pi / 3 * ((ca + 3) % 6)) * (hex_s - 8))
-                            pygame.draw.line(self.screen, (55, 10, 95),
-                                             (cx1h, cy1h), (cx2h, cy2h), 1)
+                for gc in range(gc_start, gc_end):
+                    for gr in range(gr_start, gr_end):
+                        hcx = gc * col_w - cam[0]
+                        hcy = gr * row_h + (half_r if gc % 2 else 0) - cam[1]
+                        if -hex_s * 2 < hcx < SW + hex_s * 2 and -hex_s * 2 < hcy < SH + hex_s * 2:
+                            shade    = (gc * 7 + gr * 13) % 6
+                            glow_hex = (gc * 11 + gr * 17) % 22 == 0
+                            crack_hex= (gc * 5  + gr * 19) % 15 == 0
+                            if glow_hex:
+                                tc = (42, 8, 78)
+                            elif crack_hex:
+                                tc = (30, 6, 56)
+                            elif shade < 2:
+                                tc = (18, 7, 32)
+                            elif shade < 4:
+                                tc = (22, 10, 40)
+                            else:
+                                tc = (26, 13, 48)
+                            pts = [(hcx + int(math.cos(math.pi / 3 * i) * hex_s),
+                                    hcy + int(math.sin(math.pi / 3 * i) * hex_s))
+                                   for i in range(6)]
+                            pygame.draw.polygon(self.screen, tc, pts)
+                            edge_col = (68, 18, 118) if glow_hex else (34, 14, 60)
+                            pygame.draw.polygon(self.screen, edge_col, pts, 1)
+                            if crack_hex:
+                                ca = (gc * 3 + gr * 7) % 6
+                                cx1h = hcx + int(math.cos(math.pi / 3 * ca) * (hex_s - 8))
+                                cy1h = hcy + int(math.sin(math.pi / 3 * ca) * (hex_s - 8))
+                                cx2h = hcx + int(math.cos(math.pi / 3 * ((ca + 3) % 6)) * (hex_s - 8))
+                                cy2h = hcy + int(math.sin(math.pi / 3 * ((ca + 3) % 6)) * (hex_s - 8))
+                                pygame.draw.line(self.screen, (55, 10, 95),
+                                                 (cx1h, cy1h), (cx2h, cy2h), 1)
 
-            # ── Pre-generated corruption cracks radiating from the centre ──────
-            for crack_pts in self.vex_cracks:
-                s_pts = [(int(wx - cam[0]), int(wy - cam[1])) for wx, wy in crack_pts]
-                if not any(-60 < sx < SW + 60 and -60 < sy < SH + 60 for sx, sy in s_pts):
-                    continue
-                if len(s_pts) >= 2:
-                    glow_t   = math.sin(t_vex * 0.0018 + crack_pts[0][0] * 0.001) * 0.5 + 0.5
-                    c_glow   = (max(0, min(255, int(80 + glow_t * 80))),
+                # ── Pre-generated corruption cracks ───────────────────────────
+                for crack_pts in self.vex_cracks:
+                    s_pts = [(int(wx - cam[0]), int(wy - cam[1])) for wx, wy in crack_pts]
+                    if not any(-60 < sx < SW + 60 and -60 < sy < SH + 60 for sx, sy in s_pts):
+                        continue
+                    if len(s_pts) >= 2:
+                        glow_t   = math.sin(t_vex * 0.0018 + crack_pts[0][0] * 0.001) * 0.5 + 0.5
+                        c_glow   = (max(0, min(255, int(80 + glow_t * 80))),
+                                    0,
+                                    max(0, min(255, int(130 + glow_t * 90))))
+                        c_dim    = (max(0, min(255, int(25 + glow_t * 18))),
+                                    0,
+                                    max(0, min(255, int(45 + glow_t * 30))))
+                        pygame.draw.lines(self.screen, c_dim,  False, s_pts, 3)
+                        pygame.draw.lines(self.screen, c_glow, False, s_pts, 1)
+
+                # ── Central summoning / ritual circle ──────────────────────────
+                if -360 < acx < SW + 360 and -360 < acy < SH + 360:
+                    ring_t = t_vex * 0.0010
+
+                    for ri, rr in enumerate([340, 270, 210, 150]):
+                        rp    = math.sin(ring_t + ri * 0.9) * 0.5 + 0.5
+                        r_col = (max(0, min(255, int(55 + rp * 65))),
+                                 0,
+                                 max(0, min(255, int(90 + rp * 90))))
+                        pygame.draw.circle(self.screen, r_col, (acx, acy), rr,
+                                           2 if ri % 2 == 0 else 1)
+
+                    for tri in range(2):
+                        spin = ring_t * (0.25 if tri == 0 else -0.18)
+                        tri_pts = []
+                        for i in range(3):
+                            a = spin + (math.pi * 2 / 3) * i + (math.pi / 6 if tri else 0)
+                            tri_pts.append((acx + int(math.cos(a) * 290),
+                                            acy + int(math.sin(a) * 290)))
+                        star_p = math.sin(ring_t * 1.5 + tri) * 0.5 + 0.5
+                        star_col = (max(0, min(255, int(60 + star_p * 60))),
+                                    0,
+                                    max(0, min(255, int(100 + star_p * 80))))
+                        pygame.draw.polygon(self.screen, star_col, tri_pts, 1)
+
+                    spoke_spin = ring_t * 0.18
+                    for si in range(12):
+                        sang    = (math.pi * 2 / 12) * si + spoke_spin
+                        sp      = math.sin(ring_t * 2.2 + si * 0.55) * 0.5 + 0.5
+                        sc      = (max(0, min(255, int(40 + sp * 40))),
+                                   0,
+                                   max(0, min(255, int(65 + sp * 65))))
+                        ex2 = acx + int(math.cos(sang) * 340)
+                        ey2 = acy + int(math.sin(sang) * 340)
+                        pygame.draw.line(self.screen, sc, (acx, acy), (ex2, ey2), 1)
+
+                    pygame.draw.circle(self.screen, (48, 0, 88),  (acx, acy), 90, 3)
+                    pygame.draw.circle(self.screen, (65, 0, 115), (acx, acy), 58, 2)
+                    void_p   = math.sin(ring_t * 2.8) * 0.5 + 0.5
+                    void_col = (max(0, min(255, int(90 + void_p * 70))),
                                 0,
-                                max(0, min(255, int(130 + glow_t * 90))))
-                    c_dim    = (max(0, min(255, int(25 + glow_t * 18))),
-                                0,
-                                max(0, min(255, int(45 + glow_t * 30))))
-                    pygame.draw.lines(self.screen, c_dim,  False, s_pts, 3)
-                    pygame.draw.lines(self.screen, c_glow, False, s_pts, 1)
-
-            # ── Central summoning / ritual circle ─────────────────────────────
-            if -360 < acx < SW + 360 and -360 < acy < SH + 360:
-                ring_t = t_vex * 0.0010
-
-                # Outer ward rings — 4 concentric circles, each pulsing slightly
-                for ri, rr in enumerate([340, 270, 210, 150]):
-                    rp    = math.sin(ring_t + ri * 0.9) * 0.5 + 0.5
-                    r_col = (max(0, min(255, int(55 + rp * 65))),
-                             0,
-                             max(0, min(255, int(90 + rp * 90))))
-                    pygame.draw.circle(self.screen, r_col, (acx, acy), rr,
-                                       2 if ri % 2 == 0 else 1)
-
-                # Two counter-rotating triangles forming a 6-pointed void star
-                for tri in range(2):
-                    spin = ring_t * (0.25 if tri == 0 else -0.18)
-                    tri_pts = []
-                    for i in range(3):
-                        a = spin + (math.pi * 2 / 3) * i + (math.pi / 6 if tri else 0)
-                        tri_pts.append((acx + int(math.cos(a) * 290),
-                                        acy + int(math.sin(a) * 290)))
-                    star_p = math.sin(ring_t * 1.5 + tri) * 0.5 + 0.5
-                    star_col = (max(0, min(255, int(60 + star_p * 60))),
-                                0,
-                                max(0, min(255, int(100 + star_p * 80))))
-                    pygame.draw.polygon(self.screen, star_col, tri_pts, 1)
-
-                # 12 radial spokes fanning out from centre — slowly rotating
-                spoke_spin = ring_t * 0.18
-                for si in range(12):
-                    sang    = (math.pi * 2 / 12) * si + spoke_spin
-                    sp      = math.sin(ring_t * 2.2 + si * 0.55) * 0.5 + 0.5
-                    sc      = (max(0, min(255, int(40 + sp * 40))),
-                               0,
-                               max(0, min(255, int(65 + sp * 65))))
-                    ex2 = acx + int(math.cos(sang) * 340)
-                    ey2 = acy + int(math.sin(sang) * 340)
-                    pygame.draw.line(self.screen, sc, (acx, acy), (ex2, ey2), 1)
-
-                # Inner void rings
-                pygame.draw.circle(self.screen, (48, 0, 88),  (acx, acy), 90, 3)
-                pygame.draw.circle(self.screen, (65, 0, 115), (acx, acy), 58, 2)
-                void_p   = math.sin(ring_t * 2.8) * 0.5 + 0.5
-                void_col = (max(0, min(255, int(90 + void_p * 70))),
-                            0,
-                            max(0, min(255, int(145 + void_p * 90))))
-                pygame.draw.circle(self.screen, void_col, (acx, acy), 26, 2)
-                pygame.draw.circle(self.screen, (12, 0, 24), (acx, acy), 14)  # true void core
+                                max(0, min(255, int(145 + void_p * 90))))
+                    pygame.draw.circle(self.screen, void_col, (acx, acy), 26, 2)
+                    pygame.draw.circle(self.screen, (12, 0, 24), (acx, acy), 14)
 
         # ── Normal arena floor details ────────────────────────────────────────
         if is_normal:
@@ -6020,13 +6745,18 @@ class Game:
             for wx, wy, r, col, alpha in self.nyx_nebulas:
                 nsx = int(wx - cam[0]); nsy = int(wy - cam[1])
                 if -r < nsx < SW + r and -r < nsy < SH + r:
-                    for layer in range(3):
-                        lr = max(1, int(r * (1 - layer * 0.28)))
-                        la = max(0, alpha - layer * 18)
-                        lc = lerp_color(col, (0, 0, 0), layer * 0.3)
-                        ns = pygame.Surface((lr * 2 + 4, lr * 2 + 4), pygame.SRCALPHA)
-                        pygame.draw.circle(ns, (*lc, la), (lr + 2, lr + 2), lr)
-                        self.screen.blit(ns, (nsx - lr - 2, nsy - lr - 2))
+                    if GAME_SETTINGS.low:
+                        # Single solid dim circle — no Surface allocation
+                        lc = lerp_color(col, (0, 0, 0), 0.65)
+                        pygame.draw.circle(self.screen, lc, (nsx, nsy), max(1, r // 2))
+                    else:
+                        for layer in range(3):
+                            lr = max(1, int(r * (1 - layer * 0.28)))
+                            la = max(0, alpha - layer * 18)
+                            lc = lerp_color(col, (0, 0, 0), layer * 0.3)
+                            ns = pygame.Surface((lr * 2 + 4, lr * 2 + 4), pygame.SRCALPHA)
+                            pygame.draw.circle(ns, (*lc, la), (lr + 2, lr + 2), lr)
+                            self.screen.blit(ns, (nsx - lr - 2, nsy - lr - 2))
 
         # ── Malachar: lava rivers ─────────────────────────────────────────────
         if is_malachar:
@@ -6038,14 +6768,18 @@ class Game:
                     continue
                 if len(screen_pts) < 2:
                     continue
-                glow = math.sin(t_lava * 0.003 + phase) * 0.5 + 0.5
-                lava_outer = (max(0, min(255, int(60 + 40 * glow))),
-                              max(0, min(255, int(20 + 10 * glow))), 0)
-                lava_core  = (max(0, min(255, int(200 + 55 * glow))),
-                              max(0, min(255, int(80 + 80 * glow))),
-                              max(0, min(255, int(20 * glow))))
-                pygame.draw.lines(self.screen, lava_outer, False, screen_pts, flow_w + 4)
-                pygame.draw.lines(self.screen, lava_core,  False, screen_pts, max(2, flow_w - 2))
+                if GAME_SETTINGS.low:
+                    # Single pass — no glow pulse, just a static lava colour
+                    pygame.draw.lines(self.screen, (200, 60, 0), False, screen_pts, max(2, flow_w))
+                else:
+                    glow = math.sin(t_lava * 0.003 + phase) * 0.5 + 0.5
+                    lava_outer = (max(0, min(255, int(60 + 40 * glow))),
+                                  max(0, min(255, int(20 + 10 * glow))), 0)
+                    lava_core  = (max(0, min(255, int(200 + 55 * glow))),
+                                  max(0, min(255, int(80 + 80 * glow))),
+                                  max(0, min(255, int(20 * glow))))
+                    pygame.draw.lines(self.screen, lava_outer, False, screen_pts, flow_w + 4)
+                    pygame.draw.lines(self.screen, lava_core,  False, screen_pts, max(2, flow_w - 2))
 
         # ── Gorvak: dungeon chains and lanterns ───────────────────────────────
         if is_gorvak:
@@ -6055,48 +6789,45 @@ class Game:
             for lwx, lwy, lphase, lrad in self.gorv_lanterns:
                 lsx = int(lwx - cam[0]); lsy = int(lwy - cam[1])
                 if -lrad - 20 < lsx < SW + lrad + 20 and -lrad - 20 < lsy < SH + lrad + 20:
-                    # Very slow natural torch flicker — two slow sines
-                    flicker = (math.sin(t_gorv * 0.0018 + lphase) * 0.28 +
-                               math.sin(t_gorv * 0.0047 + lphase * 2.3) * 0.12 + 0.62)
-                    flicker = max(0.3, min(1.0, flicker))
-                    cur_r   = int(lrad * flicker)
+                    if GAME_SETTINGS.low:
+                        # Single dim ambient circle — no flicker, no cage detail
+                        pygame.draw.circle(self.screen, (55, 44, 30), (lsx, lsy), lrad // 3)
+                        pygame.draw.circle(self.screen, (160, 100, 20), (lsx, lsy - 7), 3)
+                    else:
+                        # Very slow natural torch flicker — two slow sines
+                        flicker = (math.sin(t_gorv * 0.0018 + lphase) * 0.28 +
+                                   math.sin(t_gorv * 0.0047 + lphase * 2.3) * 0.12 + 0.62)
+                        flicker = max(0.3, min(1.0, flicker))
+                        cur_r   = int(lrad * flicker)
 
-                    # Filled light pool — 5 concentric filled circles fading outward
-                    # Each layer blends the warm amber into the stone floor colour
-                    for gi in range(5):
-                        t_layer = 1 - gi / 5.0            # 1.0 at centre → 0.2 outer
-                        gr      = max(1, int(cur_r * (1 - gi * 0.18)))
-                        # Centre: bright warm yellow; edge: dim amber barely above floor
-                        lc_r = max(0, min(255, int(42 + t_layer * (flicker * 90))))
-                        lc_g = max(0, min(255, int(36 + t_layer * (flicker * 45))))
-                        lc_b = max(0, min(255, int(26 + t_layer * (flicker * 8))))
-                        pygame.draw.circle(self.screen, (lc_r, lc_g, lc_b), (lsx, lsy), gr)
+                        # Filled light pool — 5 concentric filled circles fading outward
+                        for gi in range(5):
+                            t_layer = 1 - gi / 5.0
+                            gr      = max(1, int(cur_r * (1 - gi * 0.18)))
+                            lc_r = max(0, min(255, int(42 + t_layer * (flicker * 90))))
+                            lc_g = max(0, min(255, int(36 + t_layer * (flicker * 45))))
+                            lc_b = max(0, min(255, int(26 + t_layer * (flicker * 8))))
+                            pygame.draw.circle(self.screen, (lc_r, lc_g, lc_b), (lsx, lsy), gr)
 
-                    # Lantern body — small iron bracket + cage
-                    lw2 = 7
-                    # Wall bracket arm
-                    pygame.draw.line(self.screen, (90, 80, 66),
-                                     (lsx, lsy - lw2 * 3), (lsx, lsy - lw2), 2)
-                    # Cage box
-                    pygame.draw.rect(self.screen, (55, 48, 38),
-                                     (lsx - lw2, lsy - lw2 * 2, lw2 * 2, lw2 * 2 + 2),
-                                     border_radius=2)
-                    pygame.draw.rect(self.screen, (110, 96, 76),
-                                     (lsx - lw2, lsy - lw2 * 2, lw2 * 2, lw2 * 2 + 2),
-                                     1, border_radius=2)
-                    # Vertical cage bars
-                    for bxi in range(-1, 2):
-                        pygame.draw.line(self.screen, (90, 78, 62),
-                                         (lsx + bxi * lw2 // 2, lsy - lw2 * 2),
-                                         (lsx + bxi * lw2 // 2, lsy), 1)
-                    # Flame glow inside cage
-                    fc_r = max(0, min(255, int(255 * flicker)))
-                    fc_g = max(0, min(255, int(140 + flicker * 60)))
-                    pygame.draw.circle(self.screen, (fc_r, fc_g, 20),
-                                       (lsx, lsy - lw2), max(2, int(4 * flicker)))
-                    # Bright flare at tip
-                    pygame.draw.circle(self.screen, (255, 230, 160),
-                                       (lsx, lsy - lw2), max(1, int(2 * flicker)))
+                        lw2 = 7
+                        pygame.draw.line(self.screen, (90, 80, 66),
+                                         (lsx, lsy - lw2 * 3), (lsx, lsy - lw2), 2)
+                        pygame.draw.rect(self.screen, (55, 48, 38),
+                                         (lsx - lw2, lsy - lw2 * 2, lw2 * 2, lw2 * 2 + 2),
+                                         border_radius=2)
+                        pygame.draw.rect(self.screen, (110, 96, 76),
+                                         (lsx - lw2, lsy - lw2 * 2, lw2 * 2, lw2 * 2 + 2),
+                                         1, border_radius=2)
+                        for bxi in range(-1, 2):
+                            pygame.draw.line(self.screen, (90, 78, 62),
+                                             (lsx + bxi * lw2 // 2, lsy - lw2 * 2),
+                                             (lsx + bxi * lw2 // 2, lsy), 1)
+                        fc_r = max(0, min(255, int(255 * flicker)))
+                        fc_g = max(0, min(255, int(140 + flicker * 60)))
+                        pygame.draw.circle(self.screen, (fc_r, fc_g, 20),
+                                           (lsx, lsy - lw2), max(2, int(4 * flicker)))
+                        pygame.draw.circle(self.screen, (255, 230, 160),
+                                           (lsx, lsy - lw2), max(1, int(2 * flicker)))
 
             # ── Hanging chains (drawn over the light pools) ───────────────────
             for chain_pts, chain_w in self.gorv_chains:
@@ -6104,16 +6835,16 @@ class Game:
                 if not any(-40 < sx2 < SW + 40 and -40 < sy2 < SH + 40 for sx2, sy2 in spts):
                     continue
                 if len(spts) >= 2:
-                    # Dark shadow pass
-                    pygame.draw.lines(self.screen, (30, 26, 22), False, spts, chain_w + 3)
-                    # Main chain — warm iron grey, clearly visible
-                    pygame.draw.lines(self.screen, (110, 96, 78), False, spts, chain_w + 1)
-                    # Bright highlight pass
-                    pygame.draw.lines(self.screen, (150, 134, 112), False, spts, max(1, chain_w - 1))
-                    # Link oval at each joint
-                    for sx2, sy2 in spts:
-                        pygame.draw.circle(self.screen, (130, 116, 96), (sx2, sy2), chain_w + 1)
-                        pygame.draw.circle(self.screen, (170, 152, 128), (sx2, sy2), max(1, chain_w - 1))
+                    if GAME_SETTINGS.low:
+                        # Single mid-tone pass — no shadow, no highlight, no per-joint circles
+                        pygame.draw.lines(self.screen, (110, 96, 78), False, spts, chain_w)
+                    else:
+                        pygame.draw.lines(self.screen, (30, 26, 22), False, spts, chain_w + 3)
+                        pygame.draw.lines(self.screen, (110, 96, 78), False, spts, chain_w + 1)
+                        pygame.draw.lines(self.screen, (150, 134, 112), False, spts, max(1, chain_w - 1))
+                        for sx2, sy2 in spts:
+                            pygame.draw.circle(self.screen, (130, 116, 96), (sx2, sy2), chain_w + 1)
+                            pygame.draw.circle(self.screen, (170, 152, 128), (sx2, sy2), max(1, chain_w - 1))
 
         # ── World boundary ────────────────────────────────────────────────────
         bx = -cam[0]; by = -cam[1]
@@ -6589,6 +7320,7 @@ class Game:
                 # Draw world contents frozen (no updates)
                 for gc in self.gold_coins: gc.draw(self.screen, cam)
                 for orb in self.fire_orbs: orb.draw(self.screen, cam)
+                for orb in self.hp_orbs:  orb.draw(self.screen, cam)
                 for e in self.enemies: e.draw(self.screen, cam)
                 for proj in self.projectiles: proj.draw(self.screen, cam)
                 if self.boss and self.boss.alive:
@@ -6731,14 +7463,13 @@ class Game:
                         e.drop_orb = False
 
                 # ── Boss update ────────────────────────────────────────────────
-                was_enraged = self.boss.enraged if self.boss else False
-                if self.boss and self.boss.alive and not (self.boss_intro and self.boss_intro.active):
+                if self.boss and self.boss.alive and not (self.boss_intro and self.boss_intro.active) \
+                        and not (self.enrage_anim and self.enrage_anim.active):
                     self.boss.update(self.player, self.projectiles, (self.world_w, self.world_h))
-                    # Enrage announcement
-                    if not was_enraged and self.boss.enraged:
-                        self.floating_texts.append(
-                            FloatingText(self.boss.x, self.boss.y - 80,
-                                         f"{self.boss.name} ENRAGES!", (255, 80, 80), 24))
+                    # Pending enrage — start the cinematic instead of announcing directly
+                    if getattr(self.boss, '_pending_enrage', False):
+                        self.boss._pending_enrage = False
+                        self.enrage_anim = BossEnrageAnim(self.boss, self.fonts)
                     # Vexara split trigger
                     if getattr(self.boss, '_trigger_vex_split', False):
                         self.boss._trigger_vex_split = False
@@ -6788,21 +7519,17 @@ class Game:
                         self.projectiles.remove(proj); continue
 
                     if proj.owner == "player":
-                        # Boss is invulnerable during spawn cinematic
+                        # Boss is invulnerable during spawn cinematic or enrage animation
                         if self.boss and self.boss.alive:
-                            if self.boss_intro and self.boss_intro.active:
-                                pass  # cannot hit boss during intro — skip
+                            if (self.boss_intro and self.boss_intro.active) or \
+                               (self.enrage_anim and self.enrage_anim.active):
+                                pass  # cannot hit boss during either cinematic
                             elif math.hypot(proj.x - self.boss.x, proj.y - self.boss.y) < proj.size + self.boss.size:
-                                was_enraged_b = self.boss.enraged
                                 self.boss.take_damage(proj.dmg)
                                 self.floating_texts.append(FloatingText(self.boss.x, self.boss.y - 30, f"-{proj.dmg}", (255, 100, 100)))
                                 for _ in range(5):
                                     self.particles.append(Particle(proj.x, proj.y, self.boss.proj_col))
                                 proj.alive = False
-                                if not was_enraged_b and self.boss.enraged:
-                                    self.floating_texts.append(
-                                        FloatingText(self.boss.x, self.boss.y - 80,
-                                                     f"{self.boss.name} ENRAGES!", (255, 80, 80), 24))
                                 if getattr(self.boss, '_trigger_mal_spin', False):
                                     self.boss._trigger_mal_spin = False
                                     SOUNDS.play("orc_spin", volume_scale=1.0)
@@ -6861,6 +7588,10 @@ class Game:
                                                          f"LEVEL UP!  {self.player.level}", CYAN, 22))
                                     for _ in range(12):
                                         self.particles.append(Particle(e.x, e.y, e.color))
+                                    # ── HP orb drop (10% chance, max 5 orbs on screen) ──
+                                    if random.random() < 0.10 and len(self.hp_orbs) < 5:
+                                        hp_amt = 10 if e.elite else 5
+                                        self.hp_orbs.append(HpOrb(e.x, e.y, hp_amt))
                                     # ── On-death specials ──────────────────────
                                     if e.behaviour == "bounce" and not e.is_splinter:
                                         for _ in range(2):
@@ -6904,11 +7635,32 @@ class Game:
                             FloatingText(self.player.x, self.player.y - 40, f"+{gc.amount}g", YELLOW))
                         self.gold_coins.remove(gc)
 
+                # ── HP orbs ────────────────────────────────────────────────────
+                for orb in self.hp_orbs[:]:
+                    orb.update(self.player)
+                    if not orb.alive:
+                        self.floating_texts.append(
+                            FloatingText(self.player.x, self.player.y - 40,
+                                         f"+{orb.amount} HP", GREEN))
+                        self.hp_orbs.remove(orb)
+
                 # ── Boss intro tick ───────────────────────────────────────────
                 if self.boss_intro and self.boss_intro.active:
                     self.boss_intro.update()
                     if not self.boss_intro.active:
                         self.boss_intro = None   # cinematic done, boss goes live
+
+                # ── Boss enrage animation tick ────────────────────────────────
+                if self.enrage_anim and self.enrage_anim.active:
+                    self.enrage_anim.update()
+                    if not self.enrage_anim.active:
+                        # Anim done — now actually set enraged and announce
+                        if self.boss and self.boss.alive:
+                            self.boss.enraged = True
+                            self.floating_texts.append(
+                                FloatingText(self.boss.x, self.boss.y - 80,
+                                             f"{self.boss.name} ENRAGES!", (255, 80, 80), 24))
+                        self.enrage_anim = None
                 for p in self.particles[:]:
                     p.update()
                     if p.life <= 0: self.particles.remove(p)
@@ -6949,11 +7701,14 @@ class Game:
                 gc.draw(self.screen, cam)
             for orb in self.fire_orbs:
                 orb.draw(self.screen, cam)
+            for orb in self.hp_orbs:
+                orb.draw(self.screen, cam)
             for bomb in self.nyx_bombs:
                 bomb.draw(self.screen, cam)
             for e in self.enemies:
                 e.draw(self.screen, cam)
-            if self.boss and self.boss.alive and not (self.boss_intro and self.boss_intro.active):
+            if self.boss and self.boss.alive and not (self.boss_intro and self.boss_intro.active) \
+                    and not (self.enrage_anim and self.enrage_anim.active):
                 self.boss.draw(self.screen, cam)
                 for m in self.boss.minions:
                     m.draw(self.screen, cam)
@@ -6970,6 +7725,9 @@ class Game:
             if self.boss_intro and self.boss_intro.active:
                 # Cinematic draws darkness + boss materialisation + HUD on top
                 self.boss_intro.draw(self.screen, cam, self.draw_hud)
+            elif self.enrage_anim and self.enrage_anim.active:
+                # Enrage cinematic — darkness + shockwaves + card + HUD on top
+                self.enrage_anim.draw(self.screen, cam, self.draw_hud)
             else:
                 # ── Gorvak dungeon overlay (torchlight flicker, under HUD) ────
                 is_gorvak_boss = (self.boss_wave and self.boss and
@@ -6998,28 +7756,30 @@ class Game:
                     self._overlay.fill((tint_r, tint_g, 0, 28))
                     self.screen.blit(self._overlay, (0, 0))
 
-                    # Diagonal divine light shafts (screen-space, slow drift)
-                    shaft_alpha = max(0, min(255, int(18 + pulse_s * 12)))
-                    self._overlay.fill((0, 0, 0, 0))
-                    for si in range(5):
-                        shaft_x = int((SW * si / 4 + t_now * 0.008 * (1 + si * 0.3)) % (SW + 200)) - 100
-                        shaft_w = 30 + si * 12
-                        pts_shaft = [
-                            (shaft_x,           -20),
-                            (shaft_x + shaft_w, -20),
-                            (shaft_x + shaft_w + 80, SH + 20),
-                            (shaft_x + 80,           SH + 20),
-                        ]
-                        sa = max(0, min(255, shaft_alpha - si * 2))
-                        if sa > 2:
-                            pygame.draw.polygon(self._overlay,
-                                                (255, 230, 140, sa), pts_shaft)
-                    self.screen.blit(self._overlay, (0, 0))
+                    if not GAME_SETTINGS.low:
+                        # Diagonal divine light shafts (screen-space, slow drift)
+                        shaft_alpha = max(0, min(255, int(18 + pulse_s * 12)))
+                        self._overlay.fill((0, 0, 0, 0))
+                        for si in range(5):
+                            shaft_x = int((SW * si / 4 + t_now * 0.008 * (1 + si * 0.3)) % (SW + 200)) - 100
+                            shaft_w = 30 + si * 12
+                            pts_shaft = [
+                                (shaft_x,           -20),
+                                (shaft_x + shaft_w, -20),
+                                (shaft_x + shaft_w + 80, SH + 20),
+                                (shaft_x + 80,           SH + 20),
+                            ]
+                            sa = max(0, min(255, shaft_alpha - si * 2))
+                            if sa > 2:
+                                pygame.draw.polygon(self._overlay,
+                                                    (255, 230, 140, sa), pts_shaft)
+                        self.screen.blit(self._overlay, (0, 0))
 
-                    # Spawn floating divine motes
+                    # Spawn floating divine motes (LQ: much lower rate, capped list)
                     self.sera_mote_cd -= 1
-                    if self.sera_mote_cd <= 0:
-                        self.sera_mote_cd = random.randint(3, 9)
+                    lq_mote_limit = 8 if GAME_SETTINGS.low else 9999
+                    if self.sera_mote_cd <= 0 and len(self.sera_motes) < lq_mote_limit:
+                        self.sera_mote_cd = random.randint(18, 40) if GAME_SETTINGS.low else random.randint(3, 9)
                         ex = cam[0] + random.randint(0, SW)
                         ey = cam[1] + random.randint(0, SH)
                         self.sera_motes.append([
@@ -7060,10 +7820,11 @@ class Game:
                     self._overlay.fill((tint_r, tint_g, 0, 65))
                     self.screen.blit(self._overlay, (0, 0))
 
-                    # Spawn rising embers
+                    # Spawn rising embers (LQ: slower spawn, hard cap on list)
                     self.mal_ember_cd -= 1
-                    if self.mal_ember_cd <= 0:
-                        self.mal_ember_cd = random.randint(6, 16)  # slightly less frequent
+                    lq_ember_limit = 12 if GAME_SETTINGS.low else 9999
+                    if self.mal_ember_cd <= 0 and len(self.mal_embers) < lq_ember_limit:
+                        self.mal_ember_cd = random.randint(22, 45) if GAME_SETTINGS.low else random.randint(6, 16)
                         ex = cam[0] + random.randint(0, SW)
                         ey = cam[1] + random.randint(0, SH)
                         self.mal_embers.append([
@@ -7090,7 +7851,6 @@ class Game:
                                 er  = max(1, int(3 * et))
                                 ecr = max(0, min(255, int(255 - (1 - et) * 55)))
                                 ecg = max(0, min(255, int(80 + et * 140)))
-                                # Draw solid dot — alpha approximated by blending toward bg
                                 pygame.draw.circle(self.screen, (ecr, ecg, 0), (esx, esy), er)
                     self.mal_embers = surviving_em
 
@@ -7105,129 +7865,135 @@ class Game:
                     self._overlay.fill((tint_r, 0, tint_b, 90))
                     self.screen.blit(self._overlay, (0, 0))
 
-                    # ── Intense zap lines ─────────────────────────────────────
-                    self.vex_zap_cd -= 1
-                    if self.vex_zap_cd <= 0:
-                        self.vex_zap_cd = random.randint(6, 20)
-                        wx0 = cam[0] + random.randint(10, SW - 10)
-                        wy0 = cam[1] + random.randint(10, SH - 10)
-                        pts = [(wx0, wy0)]
-                        zx, zy = wx0, wy0
-                        segs   = random.randint(6, 14)
-                        length = random.randint(120, 380)
-                        base_a = random.uniform(0, math.pi * 2)
-                        seg_l  = length / segs
-                        for _ in range(segs):
-                            base_a += random.uniform(-1.1, 1.1)
-                            zx += math.cos(base_a) * seg_l
-                            zy += math.sin(base_a) * seg_l
-                            pts.append((zx, zy))
-                        life = random.randint(10, 22)
-                        self.vex_zaps.append([pts, life, life])
+                    # Extra pressure flag: clone is alive — double bullet volume
+                    clone_alive = self.boss_clone is not None and self.boss_clone.alive
 
-                    # Draw all zaps onto a single shared overlay then blit once
-                    if self.vex_zaps:
-                        self._overlay.fill((0, 0, 0, 0))
-                        surviving_vz = []
-                        for zap in self.vex_zaps:
-                            zpts, zlife, zmax = zap
-                            zlife -= 1
-                            if zlife > 0:
-                                surviving_vz.append([zpts, zlife, zmax])
-                                fade  = zlife / zmax
-                                alpha = int(255 * fade)
-                                screen_pts = [(int(px - cam[0]), int(py - cam[1])) for px, py in zpts]
-                                if len(screen_pts) >= 2:
-                                    pygame.draw.lines(self._overlay, (180, 0, 255, max(0, int(alpha * 0.5))),
-                                                      False, screen_pts, 5)
-                                    core_col = lerp_color((255, 80, 255), (255, 255, 255), fade)
-                                    pygame.draw.lines(self._overlay, (*core_col, alpha),
-                                                      False, screen_pts, 2)
-                                    pygame.draw.lines(self._overlay, (255, 255, 255, max(0, int(alpha * 0.7))),
-                                                      False, screen_pts, 1)
-                        self.screen.blit(self._overlay, (0, 0))
-                        self.vex_zaps = surviving_vz
+                    if not GAME_SETTINGS.low:
+                        # ── Intense zap lines ─────────────────────────────────
+                        self.vex_zap_cd -= 1
+                        if self.vex_zap_cd <= 0:
+                            self.vex_zap_cd = random.randint(6, 20)
+                            wx0 = cam[0] + random.randint(10, SW - 10)
+                            wy0 = cam[1] + random.randint(10, SH - 10)
+                            pts = [(wx0, wy0)]
+                            zx, zy = wx0, wy0
+                            segs   = random.randint(6, 14)
+                            length = random.randint(120, 380)
+                            base_a = random.uniform(0, math.pi * 2)
+                            seg_l  = length / segs
+                            for _ in range(segs):
+                                base_a += random.uniform(-1.1, 1.1)
+                                zx += math.cos(base_a) * seg_l
+                                zy += math.sin(base_a) * seg_l
+                                pts.append((zx, zy))
+                            life = random.randint(10, 22)
+                            self.vex_zaps.append([pts, life, life])
+
+                        # Draw all zaps onto a single shared overlay then blit once
+                        if self.vex_zaps:
+                            self._overlay.fill((0, 0, 0, 0))
+                            surviving_vz = []
+                            for zap in self.vex_zaps:
+                                zpts, zlife, zmax = zap
+                                zlife -= 1
+                                if zlife > 0:
+                                    surviving_vz.append([zpts, zlife, zmax])
+                                    fade  = zlife / zmax
+                                    alpha = int(255 * fade)
+                                    screen_pts = [(int(px - cam[0]), int(py - cam[1])) for px, py in zpts]
+                                    if len(screen_pts) >= 2:
+                                        pygame.draw.lines(self._overlay, (180, 0, 255, max(0, int(alpha * 0.5))),
+                                                          False, screen_pts, 5)
+                                        core_col = lerp_color((255, 80, 255), (255, 255, 255), fade)
+                                        pygame.draw.lines(self._overlay, (*core_col, alpha),
+                                                          False, screen_pts, 2)
+                                        pygame.draw.lines(self._overlay, (255, 255, 255, max(0, int(alpha * 0.7))),
+                                                          False, screen_pts, 1)
+                            self.screen.blit(self._overlay, (0, 0))
+                            self.vex_zaps = surviving_vz
+                        else:
+                            self.vex_zaps = [z for z in self.vex_zaps if z[1] > 0]
+
+                        # ── Drifting hex runes ────────────────────────────────
+                        self.vex_rune_cd -= 1
+                        if self.vex_rune_cd <= 0:
+                            self.vex_rune_cd = random.randint(40, 90)
+                            rwx = cam[0] + random.randint(40, SW - 40)
+                            rwy = cam[1] + random.randint(40, SH - 40)
+                            spin = random.uniform(-0.012, 0.012)
+                            life = random.randint(120, 220)
+                            self.vex_runes.append([float(rwx), float(rwy),
+                                                   random.uniform(0, math.pi * 2),
+                                                   spin, life, life])
+
+                        # Draw all runes onto shared overlay then blit once
+                        if self.vex_runes:
+                            self._overlay.fill((0, 0, 0, 0))
+                            surviving_r = []
+                            for rune in self.vex_runes:
+                                rwx, rwy, rang, spin, rlife, rmax = rune
+                                rlife -= 1
+                                rune[4] = rlife
+                                rune[2] += spin
+                                if rlife > 0:
+                                    surviving_r.append(rune)
+                                    fade  = min(1.0, rlife / rmax * 2) if rlife > rmax * 0.5 else (rlife / (rmax * 0.5))
+                                    alpha = int(70 * fade)
+                                    if alpha > 2:
+                                        rsx = int(rwx - cam[0]); rsy = int(rwy - cam[1])
+                                        if -80 < rsx < SW + 80 and -80 < rsy < SH + 80:
+                                            r_rad = int(30 + math.sin(rlife * 0.05) * 8)
+                                            hex_pts = [
+                                                (rsx + int(math.cos(rang + math.pi / 3 * i) * r_rad),
+                                                 rsy + int(math.sin(rang + math.pi / 3 * i) * r_rad))
+                                                for i in range(6)
+                                            ]
+                                            inner_pts = [
+                                                (rsx + int(math.cos(rang + math.pi / 3 * i) * (r_rad // 2)),
+                                                 rsy + int(math.sin(rang + math.pi / 3 * i) * (r_rad // 2)))
+                                                for i in range(6)
+                                            ]
+                                            rune_col = lerp_color((200, 0, 255), (255, 80, 200), pulse_t)
+                                            pygame.draw.polygon(self._overlay, (*rune_col, alpha), hex_pts, 1)
+                                            pygame.draw.polygon(self._overlay, (*rune_col, alpha // 2), inner_pts, 1)
+                                            for i in range(3):
+                                                pygame.draw.line(self._overlay, (*rune_col, alpha // 3),
+                                                                 hex_pts[i], hex_pts[i + 3], 1)
+                            self.screen.blit(self._overlay, (0, 0))
+                            self.vex_runes = surviving_r
+                        else:
+                            self.vex_runes = [r for r in self.vex_runes if r[4] > 0]
                     else:
-                        self.vex_zaps = [z for z in self.vex_zaps if z[1] > 0]
-
-                    # ── Drifting hex runes ────────────────────────────────────
-                    self.vex_rune_cd -= 1
-                    if self.vex_rune_cd <= 0:
-                        self.vex_rune_cd = random.randint(40, 90)
-                        rwx = cam[0] + random.randint(40, SW - 40)
-                        rwy = cam[1] + random.randint(40, SH - 40)
-                        spin = random.uniform(-0.012, 0.012)
-                        life = random.randint(120, 220)
-                        self.vex_runes.append([float(rwx), float(rwy),
-                                               random.uniform(0, math.pi * 2),
-                                               spin, life, life])
-
-                    # Draw all runes onto shared overlay then blit once
-                    if self.vex_runes:
-                        self._overlay.fill((0, 0, 0, 0))
-                        surviving_r = []
-                        for rune in self.vex_runes:
-                            rwx, rwy, rang, spin, rlife, rmax = rune
-                            rlife -= 1
-                            rune[4] = rlife
-                            rune[2] += spin
-                            if rlife > 0:
-                                surviving_r.append(rune)
-                                fade  = min(1.0, rlife / rmax * 2) if rlife > rmax * 0.5 else (rlife / (rmax * 0.5))
-                                alpha = int(70 * fade)
-                                if alpha > 2:
-                                    rsx = int(rwx - cam[0]); rsy = int(rwy - cam[1])
-                                    if -80 < rsx < SW + 80 and -80 < rsy < SH + 80:
-                                        r_rad = int(30 + math.sin(rlife * 0.05) * 8)
-                                        hex_pts = [
-                                            (rsx + int(math.cos(rang + math.pi / 3 * i) * r_rad),
-                                             rsy + int(math.sin(rang + math.pi / 3 * i) * r_rad))
-                                            for i in range(6)
-                                        ]
-                                        inner_pts = [
-                                            (rsx + int(math.cos(rang + math.pi / 3 * i) * (r_rad // 2)),
-                                             rsy + int(math.sin(rang + math.pi / 3 * i) * (r_rad // 2)))
-                                            for i in range(6)
-                                        ]
-                                        rune_col = lerp_color((200, 0, 255), (255, 80, 200), pulse_t)
-                                        pygame.draw.polygon(self._overlay, (*rune_col, alpha), hex_pts, 1)
-                                        pygame.draw.polygon(self._overlay, (*rune_col, alpha // 2), inner_pts, 1)
-                                        for i in range(3):
-                                            pygame.draw.line(self._overlay, (*rune_col, alpha // 3),
-                                                             hex_pts[i], hex_pts[i + 3], 1)
-                        self.screen.blit(self._overlay, (0, 0))
-                        self.vex_runes = surviving_r
-                    else:
-                        self.vex_runes = [r for r in self.vex_runes if r[4] > 0]
+                        # LQ: drain existing zap/rune lists without drawing them
+                        self.vex_zaps  = [z for z in self.vex_zaps  if z[1] > 1]
+                        self.vex_runes = [r for r in self.vex_runes  if r[4] > 1]
 
                     # ── Void wisps — drifting upward corruption motes ─────────
+                    # LQ: slow spawn rate + hard cap; halve cap again when clone is alive
+                    wisp_cap = (6 if clone_alive else 10) if GAME_SETTINGS.low else 9999
                     self.vex_wisp_cd -= 1
-                    if self.vex_wisp_cd <= 0:
-                        self.vex_wisp_cd = random.randint(4, 12)
-                        # Spawn on or near the floor cracks and summoning circle
+                    if self.vex_wisp_cd <= 0 and len(self.vex_wisps) < wisp_cap:
+                        self.vex_wisp_cd = random.randint(20, 50) if GAME_SETTINGS.low else random.randint(4, 12)
                         spawn_mode = random.randint(0, 2)
                         if spawn_mode == 0 and self.vex_cracks:
-                            # Along a random crack
                             crack = random.choice(self.vex_cracks)
                             pt    = random.choice(crack)
                             wx2, wy2 = pt[0], pt[1]
                         elif spawn_mode == 1:
-                            # Near the summoning circle centre
                             ang = random.uniform(0, math.pi * 2)
                             r2  = random.randint(0, 300)
                             wx2 = self.world_w // 2 + math.cos(ang) * r2
                             wy2 = self.world_h // 2 + math.sin(ang) * r2
                         else:
-                            # Random on screen
                             wx2 = cam[0] + random.randint(0, SW)
                             wy2 = cam[1] + random.randint(0, SH)
                         self.vex_wisps.append([
                             float(wx2), float(wy2),
-                            random.uniform(-0.35, 0.35),    # vx drift
-                            random.uniform(-1.2, -0.3),     # vy upward
+                            random.uniform(-0.35, 0.35),
+                            random.uniform(-1.2, -0.3),
                             random.randint(50, 120),
                             random.randint(50, 120),
-                            random.randint(2, 5),           # size
+                            random.randint(2, 5),
                         ])
 
                     # Update and draw wisps — two-tone void colour fading out
@@ -7237,30 +8003,31 @@ class Game:
                         w[4] -= 1
                         if w[4] > 0:
                             surviving_w.append(w)
-                            wt  = w[4] / w[5]               # 1 → 0
+                            wt  = w[4] / w[5]
                             wsx = int(w[0] - cam[0])
                             wsy = int(w[1] - cam[1])
                             if -10 < wsx < SW + 10 and -10 < wsy < SH + 10:
                                 wr  = max(1, int(w[6] * wt))
-                                # Inner core: bright pink-white; outer: deep purple
-                                wc_inner = (max(0, min(255, int(200 + wt * 55))),
-                                            max(0, min(255, int(wt * 80))),
-                                            max(0, min(255, int(220 + wt * 35))))
-                                wc_outer = (max(0, min(255, int(80 + wt * 60))),
-                                            0,
-                                            max(0, min(255, int(120 + wt * 80))))
-                                if wr > 1:
-                                    pygame.draw.circle(self.screen, wc_outer, (wsx, wsy), wr)
-                                pygame.draw.circle(self.screen, wc_inner, (wsx, wsy), max(1, wr - 1))
+                                if GAME_SETTINGS.low:
+                                    # Single colour draw on LQ
+                                    pygame.draw.circle(self.screen, (140, 0, 200), (wsx, wsy), wr)
+                                else:
+                                    wc_inner = (max(0, min(255, int(200 + wt * 55))),
+                                                max(0, min(255, int(wt * 80))),
+                                                max(0, min(255, int(220 + wt * 35))))
+                                    wc_outer = (max(0, min(255, int(80 + wt * 60))),
+                                                0,
+                                                max(0, min(255, int(120 + wt * 80))))
+                                    if wr > 1:
+                                        pygame.draw.circle(self.screen, wc_outer, (wsx, wsy), wr)
+                                    pygame.draw.circle(self.screen, wc_inner, (wsx, wsy), max(1, wr - 1))
                     self.vex_wisps = surviving_w
 
                     # ── Summoning circle overlay glow (over all game objects) ──
-                    # Soft expanding/contracting void ring centred on arena centre
                     acx_ov = int(self.world_w // 2 - cam[0])
                     acy_ov = int(self.world_h // 2 - cam[1])
                     if -500 < acx_ov < SW + 500 and -500 < acy_ov < SH + 500:
                         ring_t_ov = t_now * 0.0010
-                        # Three pulsing glow rings drawn directly — no Surface alloc
                         for ri, base_r in enumerate([148, 100, 55]):
                             rp     = math.sin(ring_t_ov * 1.4 + ri * 1.1) * 0.5 + 0.5
                             cr     = max(1, int(base_r + rp * 14) - ri * 2)
@@ -7567,7 +8334,7 @@ class Game:
 
 if __name__ == "__main__":
     _screen = pygame.display.set_mode((SW, SH))
-    pygame.display.set_caption("Dungeon Crawler 41.0b2")
+    pygame.display.set_caption("Dungeon Crawler 42.0b14")
 
     # Window icon
     _icon_path = asset("icon.png")
@@ -7579,11 +8346,11 @@ if __name__ == "__main__":
 
     _clock  = pygame.time.Clock()
     _fonts  = {
-        "large": pygame.font.SysFont("consolas", 28, bold=True),
-        "med":   pygame.font.SysFont("consolas", 20, bold=True),
-        "small": pygame.font.SysFont("consolas", 15),
-        "tiny":  pygame.font.SysFont("consolas", 13),
-        "huge":  pygame.font.SysFont("consolas", 48, bold=True),
+        "large": _make_font(28, bold=True),
+        "med":   _make_font(20, bold=True),
+        "small": _make_font(15),
+        "tiny":  _make_font(13),
+        "huge":  _make_font(48, bold=True),
     }
     while True:
         chosen_name = username_screen(_screen, _clock, _fonts)
