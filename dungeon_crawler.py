@@ -527,12 +527,26 @@ SETTINGS_FILE  = os.path.join(DATA_DIR, "settings.json")
 FIRST_RUN_FILE = os.path.join(DATA_DIR, "first_run.json")
 
 class GameSettings:
-    """Persists quality and volume settings across launches."""
+    """Persists quality, volume, display settings across launches."""
+    # Supported windowed resolutions (width, height) — all 16:9
+    RESOLUTIONS = [
+        (1280, 720),
+        #(1600, 900),
+        #(1920, 1080),
+    ]
+
     def __init__(self):
         data = self._load()
-        self.quality       = data.get("quality",       "high")
-        self.music_volume  = float(data.get("music_volume",  0.5))
-        self.sounds_volume = float(data.get("sounds_volume", 0.6))
+        self.quality            = data.get("quality",            "high")
+        self.music_volume       = float(data.get("music_volume",  0.5))
+        self.sounds_volume      = float(data.get("sounds_volume", 0.6))
+        self.player_health_bar  = bool(data.get("player_health_bar", False))
+        # Display settings
+        res_raw                 = data.get("resolution", [1280, 720])
+        self.resolution         = tuple(res_raw) if isinstance(res_raw, list) else (1280, 720)
+        if self.resolution not in self.RESOLUTIONS:
+            self.resolution = (1280, 720)
+        self.fullscreen         = bool(data.get("fullscreen", False))
 
     def _load(self):
         try:
@@ -545,9 +559,12 @@ class GameSettings:
         try:
             with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
                 json.dump({
-                    "quality":       self.quality,
-                    "music_volume":  MUSIC.volume,
-                    "sounds_volume": SOUNDS.volume,
+                    "quality":           self.quality,
+                    "music_volume":      MUSIC.volume,
+                    "sounds_volume":     SOUNDS.volume,
+                    "player_health_bar": self.player_health_bar,
+                    "resolution":        list(self.resolution),
+                    "fullscreen":        self.fullscreen,
                 }, f, indent=2)
         except Exception as e:
             print(f"[Settings] Could not save: {e}")
@@ -579,10 +596,10 @@ DARK   = (18, 18, 28)
 PANEL  = (28, 28, 42)
 
 WAVE_BREAK_SECS = 10
-GAME_VERSION    = "42.0b14"
+GAME_VERSION    = "43.1b8"
 
 # ── Online version check ──────────────────────────────────────────────────────
-_GH_API_URL  = "https://api.github.com/repos/gert-leja/dungeon_crawler/releases"
+_GH_API_URL  = ""#"https://api.github.com/repos/gert-leja/dungeon_crawler/releases"
 _update_info = {}   # filled by background thread: {"version", "url", "notes"}
 
 def _fetch_latest_release():
@@ -668,27 +685,27 @@ threading.Thread(target=_fetch_latest_release, daemon=True).start()
 # Categories: "added", "changed", "fixed", "removed"
 PATCH_NOTES = [
     {
-        "version": "42.0",
-        "date":    "23-03-2026",
+        "version": "43.1",
+        "date":    "24-03-2026",
         "changes": [
-            ("added",   "Automated update checking for new release upon launch."),
-            ("added",   "Enemies and bosses now drop HP orbs upon death occasionally."),
-            ("added",   "Bosses now have an enraged mode animation that shows when they enter enraged mode."),
-            ("added",   "Game is now compatible with MacOS (some features may still be broken)."),
-            ("changed",   "Seraphix enraged mode dash cooldown has been increased."),
-            ("changed",   "Nail Gun range increased from 260 to 380"),
-            ("changed",   "Twin Blaster range increased from 300 to 420"),
-            ("changed",   "Plasma Cannon range increased from 380 to 520"),
-            ("changed",   "Tri-Laser range increased from 340 to 480"),
-            ("changed",   "Perk cards have received a visual overhaul."),
-            ("changed",   "Low Quality mode has received an overhaul, now adjusts quality in boss arenas and any new visuals to reduce performance costs."),
+            ("removed",   "Resolution options are currently running into an issue with scaling, so they are removed in this update."),
+            ("fixed",   "Fullscreen crashing the game when selected."),
+            ("changed",   "Main menu song has been changed."),
         ],
     },
     {
-        "version": "41.0",
-        "date":    "20-03-2026",
+        "version": "43.0",
+        "date":    "24-03-2026",
         "changes": [
-            ("changed",   "Vexara boss arena recieved a complete overhaul"),
+            ("added",   "Settings now has a toggle for a health bar to be visible for the player (defaults to False)."),
+            ("added",   "HP Orbs now show up on the minimap."),
+            ("added",   "Settings has a toggle for fullscreen/windowed mode and the ability to change resolution."),
+            ("changed", "The Stormborn cosmetic has recieved a visual change."),
+            ("changed", "Gold and HP Orbs get automatically added to the player after 10 seconds."),
+            ("changed", "Void Orbiter and Scattershot have been reworked."),
+            ("changed", "Game logo has been updated, along with some new assets."),
+            ("fixed",   "Cosmetics flickering during dash. (Issue #4 on GitHub)"),
+            ("removed", "Tried to remove Herobrine."),
         ],
     },
 ]
@@ -705,6 +722,14 @@ COSMETICS = [
         "cost":    0,
         "pattern": "default",
         "preview": CYAN,
+    },
+    {
+        "id":      "gold",
+        "name":    "Gilded",
+        "desc":    "Worth its weight in gold",
+        "cost":    1,
+        "pattern": "gold",
+        "preview": YELLOW,
     },
     {
         "id":      "fire",
@@ -729,14 +754,6 @@ COSMETICS = [
         "cost":    5,
         "pattern": "void",
         "preview": (100, 0, 180),
-    },
-    {
-        "id":      "gold",
-        "name":    "Gilded",
-        "desc":    "Worth its weight in gold",
-        "cost":    5,
-        "pattern": "gold",
-        "preview": YELLOW,
     },
     {
         "id":      "storm",
@@ -776,7 +793,7 @@ COSMETICS = [
     {
         "id":      "lavalord",
         "name":    "Lava Lord",
-        "desc":    "Forged in eternal fire",
+        "desc":    "Burn your enemies",
         "cost":    12,
         "pattern": "lavalord",
         "preview": (180, 40, 0),
@@ -826,8 +843,8 @@ CREDITS = {
         "John Dungeon - Nyxoth",
         "John Dungeon - Seraphix",
         "John Dungeon - Gorvak",
-        "John Dungeon - Battle",
-        "John Dungeon - Menu",
+        "breakingcopyright.com - Silverman Sound Studios - The Medieval Banquet",
+        "breakingcopyright.com - Scott Buckley - Legionnaire",
         "",
         "SFX:",
         "pixabay.com - VoiceBosch - The Moses (Laser Cannon)",
@@ -870,10 +887,10 @@ WEAPONS = [
         "desc": "Two parallel bolts",
     },
     {
-        "name": "Scatter Shot",    "damage": 20,  "speed": 0.52, "range": 200,
+        "name": "Scattershot",    "damage": 28,  "speed": 0.54, "range": 350,
         "cost": 180,  "req_lvl": 5,  "color": ORANGE,
-        "proj_size": 5,  "behaviour": "shotgun",  "fire_interval": 22,
-        "desc": "5-bullet spread, short range",
+        "proj_size": 5,  "behaviour": "shotgun",  "fire_interval": 60,
+        "desc": "5-bullet spread",
     },
     {
         "name": "Plasma Cannon",   "damage": 70,  "speed": 0.44, "range": 520,
@@ -888,10 +905,10 @@ WEAPONS = [
         "desc": "Three beams in a fan",
     },
     {
-        "name": "Void Orbiter",    "damage": 38,  "speed": 0.50, "range": 360,
-        "cost": 750,  "req_lvl": 999, "color": (160, 0, 220),
-        "proj_size": 7,  "behaviour": "orbit",    "fire_interval": 40,
-        "desc": "Spinning ring of bullets",
+        "name": "Void Orbiter",    "damage": 55,  "speed": 0.50, "range": 750,
+        "cost": 750,  "req_lvl": 12, "color": (160, 0, 220),
+        "proj_size": 8,  "behaviour": "orbit",    "fire_interval": 50,
+        "desc": "Orbs orbit outwards",
     },
     {
         "name": "Storm Pistol",    "damage": 20,  "speed": 0.62, "range": 300,
@@ -927,7 +944,7 @@ SPECIAL_WEAPONS = [
         "proj_size": 9,
         "behaviour": "corrupted_homing",
         "fire_interval": 40,
-        "desc":      "4 aggressive homing bolts",
+        "desc":      "The Corruption is real",
         "unlock_type":  "corruption_waves",
         "unlock_value": 5,
         "unlock_hint":  "Clear 5 Corruption Waves to unlock",
@@ -1072,6 +1089,7 @@ def draw_bar(surf, x, y, w, h, val, maxval, col, bg=(40, 40, 55)):
 class GoldCoin:
     PICKUP_RADIUS = 40
     BOB_SPEED     = 0.08
+    LIFETIME      = 600   # 10 seconds at 60fps
 
     def __init__(self, x, y, amount):
         self.x = float(x)
@@ -1085,6 +1103,7 @@ class GoldCoin:
         self.vy       = math.sin(angle) * spd
         self.friction = 0.88
         self.radius   = 5 if amount < 20 else (7 if amount < 60 else 10)
+        self.life_timer = 0   # counts up; auto-collected at LIFETIME
 
     def update(self, player):
         self.vx *= self.friction
@@ -1092,8 +1111,9 @@ class GoldCoin:
         self.x  += self.vx
         self.y  += self.vy
         self.bob_t += self.BOB_SPEED
+        self.life_timer += 1
         dist = math.hypot(self.x - player.x, self.y - player.y)
-        if dist < self.PICKUP_RADIUS:
+        if dist < self.PICKUP_RADIUS or self.life_timer >= self.LIFETIME:
             bonus = int(self.amount * player.perk("gold_pct"))
             player.gold += self.amount + bonus
             self.alive = False
@@ -1116,6 +1136,7 @@ class GoldCoin:
 class HpOrb:
     PICKUP_RADIUS = 32
     BOB_SPEED     = 0.10
+    LIFETIME      = 600   # 10 seconds at 60fps
 
     def __init__(self, x, y, amount):
         self.x       = float(x)
@@ -1128,6 +1149,7 @@ class HpOrb:
         self.vx      = math.cos(angle) * spd
         self.vy      = math.sin(angle) * spd
         self.friction = 0.90
+        self.life_timer = 0   # counts up; auto-collected at LIFETIME
 
     def update(self, player):
         self.vx   *= self.friction
@@ -1135,7 +1157,9 @@ class HpOrb:
         self.x    += self.vx
         self.y    += self.vy
         self.bob_t += self.BOB_SPEED
-        if math.hypot(self.x - player.x, self.y - player.y) < self.PICKUP_RADIUS:
+        self.life_timer += 1
+        if (math.hypot(self.x - player.x, self.y - player.y) < self.PICKUP_RADIUS
+                or self.life_timer >= self.LIFETIME):
             player.hp  = min(player.max_hp, player.hp + self.amount)
             self.alive = False
 
@@ -1291,31 +1315,81 @@ class CorruptedHomingProjectile(PlayerHomingProjectile):
         pygame.draw.circle(gsurf, (r2, g2, b2, 80), (gs, gs), gs)
         surf.blit(gsurf, (sx - gs, sy - gs))
 
-class OrbitProjectile(Projectile):
+class VoidOrbiterOrb:
     """
-    Void Orbiter ring bullet — all bullets spawn at the player and travel outward
-    in a ring centred on the aim direction, spinning as they expand.
+    Void Orbiter orb — orbits the player and slowly spirals outward while the
+    mouse is held.  When the player releases LMB (or the orb reaches max_orbit_r)
+    it detaches and flies outward as a normal Projectile, then expires at max_dist.
     """
-    def __init__(self, x, y, angle, dmg, spd, rng, col, size, ring_idx, ring_total):
-        super().__init__(x, y, math.cos(angle), math.sin(angle),
-                         dmg, spd, rng, col, size, owner="player")
-        self.base_angle = angle          # initial angle for this bullet
-        self.ring_idx   = ring_idx
-        self.ring_total = ring_total
-        self.spin_rate  = 0.07           # radians added per frame
-        self.age        = 0
+    ORBIT_START_R = 30      # pixels from player centre at spawn
+    ORBIT_EXPAND  = 0.9     # pixels per frame added to orbit radius while held
+    MAX_ORBIT_R   = 180     # max orbit radius before auto-detach
+    SPIN_RATE     = 0.09    # radians per frame
 
-    def update(self):
-        self.age += 1
-        current_ang = self.base_angle + self.age * self.spin_rate
-        spd_mag = math.hypot(self.vx, self.vy)
-        self.vx = math.cos(current_ang) * spd_mag
-        self.vy = math.sin(current_ang) * spd_mag
-        self.x    += self.vx
-        self.y    += self.vy
-        self.dist += spd_mag
-        if self.dist >= self.max_dist:
-            self.alive = False
+    def __init__(self, player, angle, dmg, spd, max_dist, col, size, orb_idx, orb_count):
+        self.player     = player        # reference to Player — used while orbiting
+        self.angle      = angle         # current orbital angle
+        self.dmg        = dmg
+        self.spd_mag    = spd * Projectile.SPD_SCALE
+        self.max_dist   = max_dist
+        self.col        = col
+        self.size       = size
+        self.orb_idx    = orb_idx
+        self.orb_count  = orb_count
+        self.orbit_r    = self.ORBIT_START_R + orb_idx * (self.ORBIT_START_R / max(1, orb_count))
+        self.orbiting   = True          # True = still circling player
+        self.alive      = True
+        self.owner      = "player"
+        # Position (set each frame while orbiting)
+        self.x = player.x + math.cos(angle) * self.orbit_r
+        self.y = player.y + math.sin(angle) * self.orbit_r
+        # Velocity used once detached
+        self.vx = 0.0
+        self.vy = 0.0
+        self.dist = 0.0
+
+    def update(self, mouse_held):
+        if self.orbiting:
+            self.angle    += self.SPIN_RATE
+            self.orbit_r  += self.ORBIT_EXPAND
+            self.x = self.player.x + math.cos(self.angle) * self.orbit_r
+            self.y = self.player.y + math.sin(self.angle) * self.orbit_r
+            # Detach if mouse released or max orbit radius reached
+            if not mouse_held or self.orbit_r >= self.MAX_ORBIT_R:
+                self.orbiting = False
+                self.vx = math.cos(self.angle) * self.spd_mag
+                self.vy = math.sin(self.angle) * self.spd_mag
+        else:
+            self.x    += self.vx
+            self.y    += self.vy
+            self.dist += self.spd_mag
+            if self.dist >= self.max_dist:
+                self.alive = False
+
+    def draw(self, surf, cam):
+        sx = int(self.x - cam[0]); sy = int(self.y - cam[1])
+        col = self.col
+        # Outer glow
+        gs = self.size + 5
+        gsurf = pygame.Surface((gs * 2, gs * 2), pygame.SRCALPHA)
+        glow_alpha = 90 if self.orbiting else 55
+        pygame.draw.circle(gsurf, (*col, glow_alpha), (gs, gs), gs)
+        surf.blit(gsurf, (sx - gs, sy - gs))
+        # Core orb
+        pygame.draw.circle(surf, col, (sx, sy), self.size)
+        # Bright inner
+        inner = lerp_color(col, (255, 255, 255), 0.45)
+        pygame.draw.circle(surf, inner, (sx, sy), max(2, self.size - 3))
+        # Trail line back toward player while orbiting
+        if self.orbiting:
+            px = int(self.player.x - cam[0])
+            py = int(self.player.y - cam[1])
+            trail_col = (*lerp_color(col, (0, 0, 0), 0.6), 80)
+            tsurf = pygame.Surface((abs(sx - px) + 4, abs(sy - py) + 4), pygame.SRCALPHA)
+            ox = min(sx, px); oy = min(sy, py)
+            pygame.draw.line(tsurf, trail_col,
+                             (sx - ox, sy - oy), (px - ox, py - oy), 1)
+            surf.blit(tsurf, (ox, oy))
 
 # ── Pierce Projectile ─────────────────────────────────────────────────────────
 
@@ -1385,6 +1459,11 @@ class Player:
         self.dash_vx        = 0.0
         self.dash_vy        = 0.0
         self.dash_trail     = []       # list of (x, y, alpha) for afterimage
+        self.hurt_flash     = 0        # counts down only on damage, drives cosmetic flicker
+
+        # Void Orbiter state
+        self.void_orbs       = []      # active VoidOrbiterOrbs currently orbiting
+        self.mouse_hold_frames = 0     # frames LMB has been continuously held
 
     @property
     def weapon(self):
@@ -1429,8 +1508,9 @@ class Player:
         if self.iframes > 0:
             return False
         reduced = int(dmg * (1.0 - min(0.75, self.perk("defense"))))
-        self.hp      -= max(1, reduced)
-        self.iframes  = 45
+        self.hp       -= max(1, reduced)
+        self.iframes   = 45
+        self.hurt_flash = 45   # drives cosmetic flicker — only set on real damage
         return True
 
     def can_shoot(self):
@@ -1483,14 +1563,12 @@ class Player:
             _proj(base_a + random.uniform(-0.04, 0.04))
 
         elif beh == "orbit":
-            # Ring of 10 bullets fired in the aimed direction — spins and expands from there
-            count = 10
+            # Spawn 6 orbs that orbit the player and spiral outward while held
+            count = 6
             for i in range(count):
-                # Offset each bullet evenly around a full circle, centred on aim direction
                 ang = base_a + (math.pi * 2 / count * i)
-                projectiles.append(OrbitProjectile(
-                    self.x, self.y,
-                    ang, dmg, spd, rng, col, sz, i, count))
+                self.void_orbs.append(VoidOrbiterOrb(
+                    self, ang, dmg, spd, rng, col, sz, i, count))
 
         elif beh == "homing":
             # 3 homing seekers fanned slightly
@@ -1597,13 +1675,30 @@ class Player:
         if self.shoot_cooldown > 0:
             self.shoot_cooldown -= 1
         mouse_held = pygame.mouse.get_pressed()[0]
+        if mouse_held:
+            self.mouse_hold_frames += 1
+        else:
+            self.mouse_hold_frames = 0
         if self.shoot_cooldown == 0 and mouse_held:
             wx = mx + cam[0]; wy = my + cam[1]
             ddx = wx - self.x; ddy = wy - self.y
             if math.hypot(ddx, ddy) > 5:
                 self.shoot(ddx, ddy, projectiles, enemies_ref=getattr(self, '_enemies_ref', []))
+
+        # Update void orbs — pass current mouse state so they know when to detach
+        still_orbiting = []
+        for orb in self.void_orbs:
+            orb.update(bool(mouse_held))
+            if orb.orbiting:
+                still_orbiting.append(orb)
+            elif orb.alive:
+                projectiles.append(orb)   # detached — hand off to main projectile list
+            # dead orbs (dist exceeded) are simply dropped
+        self.void_orbs = still_orbiting
         if self.iframes > 0:
             self.iframes -= 1
+        if self.hurt_flash > 0:
+            self.hurt_flash -= 1
         # HP regen tick
         regen = self.perk("hp_regen")
         if regen > 0:
@@ -1624,12 +1719,14 @@ class Player:
             surf.blit(trail_s, (int(tx - cam[0]) - self.size,
                                 int(ty - cam[1]) - self.size))
 
+        # Void Orbiter orbs — draw while they're still orbiting the player
+        for orb in self.void_orbs:
+            orb.draw(surf, cam)
+
         # Shadow
         pygame.draw.ellipse(surf, (10, 10, 20),
                             (sx - self.size, sy + self.size - 4, self.size * 2, 10))
-
-        # ── Cosmetic body draw ────────────────────────────────────────────────
-        hurt = self.iframes > 0 and self.iframes % 6 < 3
+        hurt = self.hurt_flash > 0 and self.hurt_flash % 6 < 3
         pat  = self.active_cosmetic
         t    = self._cosm_tick
 
@@ -1783,6 +1880,61 @@ class Player:
                 ly = sy + int(math.sin(a) * (self.size - 4))
                 pygame.draw.circle(surf, (200, 230, 255), (lx, ly), 3)
             pygame.draw.circle(surf, (150, 200, 255), (sx, sy), self.size // 3)
+
+            # ── Lightning bolts radiating outward ─────────────────────────────
+            # Each bolt fires on a fixed interval staggered per bolt index,
+            # travels outward for a short duration, then resets.
+            BOLT_COUNT    = 5       # number of bolts simultaneously in play
+            BOLT_INTERVAL = 18      # frames between each bolt firing
+            BOLT_LIFE     = 10      # frames a bolt is visible
+            BOLT_REACH    = 28      # max distance from player edge in pixels
+            BOLT_SEGS     = 4       # jagged segments per bolt
+
+            for bi in range(BOLT_COUNT):
+                # Stagger bolt timings so they don't all fire at once
+                phase = (t + bi * (BOLT_INTERVAL // BOLT_COUNT)) % BOLT_INTERVAL
+                if phase >= BOLT_LIFE:
+                    continue   # this bolt is currently dormant
+
+                progress = phase / BOLT_LIFE   # 0→1 over the bolt's life
+
+                # Deterministic random angle and jitter seed from tick + bolt index
+                seed = (t // BOLT_INTERVAL) * BOLT_COUNT + bi
+                rng_ang  = ((seed * 2654435761) & 0xFFFF) / 0xFFFF * math.pi * 2
+                base_len = self.size + int(progress * BOLT_REACH)
+
+                # Build the jagged bolt as a series of displaced midpoints
+                start_x = sx + int(math.cos(rng_ang) * self.size)
+                start_y = sy + int(math.sin(rng_ang) * self.size)
+                end_x   = sx + int(math.cos(rng_ang) * (self.size + base_len))
+                end_y   = sy + int(math.sin(rng_ang) * (self.size + base_len))
+
+                pts = [(start_x, start_y)]
+                for si in range(1, BOLT_SEGS):
+                    frac      = si / BOLT_SEGS
+                    mx_pt     = start_x + int((end_x - start_x) * frac)
+                    my_pt     = start_y + int((end_y - start_y) * frac)
+                    # Perpendicular jitter — deterministic per segment
+                    jitter_seed = ((seed * 1234567 + si * 987654) & 0x7FFF)
+                    jitter = ((jitter_seed % 13) - 6)   # -6 to +6 pixels
+                    perp_x = -int(math.sin(rng_ang) * jitter)
+                    perp_y =  int(math.cos(rng_ang) * jitter)
+                    pts.append((mx_pt + perp_x, my_pt + perp_y))
+                pts.append((end_x, end_y))
+
+                # Fade out toward end of life
+                alpha = int(255 * (1.0 - progress ** 1.5))
+
+                # Draw the bolt — outer glow then bright core
+                for p0, p1 in zip(pts, pts[1:]):
+                    glow_s = pygame.Surface(
+                        (abs(p1[0]-p0[0]) + 10, abs(p1[1]-p0[1]) + 10), pygame.SRCALPHA)
+                    ox2 = min(p0[0], p1[0]) - 5
+                    oy2 = min(p0[1], p1[1]) - 5
+                    pygame.draw.line(surf, (100, 180, 255, max(0, alpha // 3)),
+                                     p0, p1, 3)   # soft outer glow
+                    pygame.draw.line(surf, (220, 240, 255, max(0, alpha)),
+                                     p0, p1, 1)   # bright white-blue core
         elif pat == "wings":
             # ── Draw wings BEHIND the orb first ──────────────────────────────
             flap      = math.sin(t * 0.08)          # -1 to 1, slow gentle flap
@@ -2096,6 +2248,13 @@ class Player:
         bg_surf.fill((0, 0, 0, 140))
         surf.blit(bg_surf, (name_x - pad, name_y - 2))
         surf.blit(name_surf, (name_x, name_y))
+
+        # Optional player health bar (shown when enabled in settings)
+        if GAME_SETTINGS.player_health_bar:
+            bw = self.size * 2 + 16
+            bx = sx - bw // 2
+            by = sy - self.size - 10
+            draw_bar(surf, bx, by, bw, 5, self.hp, self.max_hp, (50, 220, 80))
 
 # ── Enemy ─────────────────────────────────────────────────────────────────────
 
@@ -5130,6 +5289,22 @@ class PerkScreen:
             surf.blit(key_surf, (icon_cx - key_surf.get_width() // 2,
                                  badge_y + badge_h // 2 - key_surf.get_height() // 2))
 
+# ── Display scaling helper ────────────────────────────────────────────────────
+
+def _scaled_flip(render_surf):
+    """
+    Present the current frame.  Because apply_display_mode always uses
+    pygame.SCALED, the display surface is already the 1280×720 logical
+    canvas — pygame handles the physical upscale and mouse-coordinate
+    remapping automatically.  We just flip.
+
+    render_surf is accepted for API compatibility but is unused: callers
+    draw directly to the display surface (returned by apply_display_mode /
+    pygame.display.get_surface()), so no intermediate blit is required.
+    """
+    pygame.display.flip()
+
+
 # ── Username entry screen ─────────────────────────────────────────────────────
 
 def is_first_run():
@@ -5205,14 +5380,17 @@ def username_screen(screen, clock, fonts):
     }
 
     # Settings panel geometry (defined here so hit-tests work before first draw)
-    SP_W, SP_H = 420, 360   # taller to fit quality row
+    SP_W, SP_H = 420, 540   # taller to fit display settings rows
     SP_X = SW // 2 - SP_W // 2
     SP_Y = SH // 2 - SP_H // 2
-    SLIDER_X  = SP_X + 80
-    SLIDER_W  = SP_W - 160
-    SLIDER_Y  = SP_Y + 110    # music slider Y
-    SLIDER2_Y = SP_Y + 195    # sfx slider Y
-    QUALITY_Y = SP_Y + 268    # quality toggle Y
+    SLIDER_X    = SP_X + 80
+    SLIDER_W    = SP_W - 160
+    SLIDER_Y    = SP_Y + 110    # music slider Y
+    SLIDER2_Y   = SP_Y + 195    # sfx slider Y
+    QUALITY_Y   = SP_Y + 268    # quality toggle Y
+    HEALTHBAR_Y = SP_Y + 328    # player health bar toggle Y
+    RESOL_Y     = SP_Y + 388    # resolution picker Y
+    FSCRN_Y     = SP_Y + 468    # fullscreen toggle Y
 
     def vol_to_x(vol):
         return int(SLIDER_X + vol * SLIDER_W)
@@ -5273,6 +5451,29 @@ def username_screen(screen, clock, fonts):
                             if menu_video[0] is None:
                                 menu_video[0] = MenuVideo()
                             slideshow_surfs.clear()
+                    elif (SP_X + 20 <= px <= SP_X + SP_W - 20 and
+                            HEALTHBAR_Y <= py <= HEALTHBAR_Y + 36):
+                        GAME_SETTINGS.player_health_bar = not GAME_SETTINGS.player_health_bar
+                        GAME_SETTINGS.save()
+                    elif RESOL_Y <= py <= RESOL_Y + 36:
+                        # Resolution buttons — 3 options side by side
+                        res_list = GAME_SETTINGS.RESOLUTIONS
+                        rbtn_w   = (SP_W - 40 - (len(res_list) - 1) * 8) // len(res_list)
+                        for ri, res in enumerate(res_list):
+                            rx = SP_X + 20 + ri * (rbtn_w + 8)
+                            if rx <= px <= rx + rbtn_w:
+                                if GAME_SETTINGS.resolution != res:
+                                    GAME_SETTINGS.resolution = res
+                                    GAME_SETTINGS.fullscreen  = False
+                                    GAME_SETTINGS.save()
+                                    apply_display_mode(None)
+                                    screen = pygame.display.get_surface()
+                    elif FSCRN_Y <= py <= FSCRN_Y + 36:
+                        if SP_X + 20 <= px <= SP_X + SP_W - 20:
+                            GAME_SETTINGS.fullscreen = not GAME_SETTINGS.fullscreen
+                            GAME_SETTINGS.save()
+                            apply_display_mode(None)
+                            screen = pygame.display.get_surface()
                     elif not (SP_X <= px <= SP_X + SP_W and SP_Y <= py <= SP_Y + SP_H):
                         show_settings = False
                 if event.type == pygame.MOUSEBUTTONUP and event.button == 1:
@@ -5853,6 +6054,66 @@ def username_screen(screen, clock, fonts):
             close_h = fonts["small"].render("Click outside or press ESC / ENTER to close", True, GRAY)
             screen.blit(close_h, (SP_X + SP_W // 2 - close_h.get_width() // 2, SP_Y + SP_H - 28))
 
+            # Player health bar toggle
+            pygame.draw.line(screen, (45, 45, 65),
+                             (SP_X + 20, HEALTHBAR_Y - 10), (SP_X + SP_W - 20, HEALTHBAR_Y - 10), 1)
+            hb_col  = (80, 220, 140)
+            hb_on   = GAME_SETTINGS.player_health_bar
+            hb_lbl  = fonts["med"].render("Player Health Bar", True, WHITE)
+            screen.blit(hb_lbl, (SP_X + 20, HEALTHBAR_Y + 8))
+            # Toggle pill
+            pill_x = SP_X + SP_W - 80; pill_y = HEALTHBAR_Y + 4
+            pill_w = 56; pill_h = 28
+            pill_bg = lerp_color(PANEL, hb_col, 0.35 if hb_on else 0.05)
+            pygame.draw.rect(screen, pill_bg, (pill_x, pill_y, pill_w, pill_h), border_radius=14)
+            pygame.draw.rect(screen, hb_col if hb_on else GRAY,
+                             (pill_x, pill_y, pill_w, pill_h), 2, border_radius=14)
+            knob_x = pill_x + pill_w - 16 if hb_on else pill_x + 12
+            pygame.draw.circle(screen, hb_col if hb_on else GRAY, (knob_x, pill_y + pill_h // 2), 10)
+            on_off = fonts["tiny"].render("ON" if hb_on else "OFF", True, hb_col if hb_on else GRAY)
+            screen.blit(on_off, (pill_x + pill_w // 2 - on_off.get_width() // 2,
+                                  pill_y + pill_h // 2 - on_off.get_height() // 2))
+
+            # ── Resolution picker ─────────────────────────────────────────────
+            pygame.draw.line(screen, (45, 45, 65),
+                             (SP_X + 20, RESOL_Y - 10), (SP_X + SP_W - 20, RESOL_Y - 10), 1)
+            res_lbl = fonts["med"].render("Resolution", True, WHITE)
+            screen.blit(res_lbl, (SP_X + 20, RESOL_Y + 8))
+            res_list = GAME_SETTINGS.RESOLUTIONS
+            rbtn_w   = (SP_W - 40 - (len(res_list) - 1) * 8) // len(res_list)
+            res_col  = (100, 180, 255)
+            for ri, res in enumerate(res_list):
+                rx       = SP_X + 20 + ri * (rbtn_w + 8)
+                active_r = (GAME_SETTINGS.resolution == res and not GAME_SETTINGS.fullscreen)
+                rbg      = lerp_color(PANEL, res_col, 0.3 if active_r else 0.05)
+                pygame.draw.rect(screen, rbg,  (rx, RESOL_Y, rbtn_w, 36), border_radius=8)
+                pygame.draw.rect(screen, res_col if active_r else GRAY,
+                                 (rx, RESOL_Y, rbtn_w, 36), 2 if active_r else 1, border_radius=8)
+                rlabel = f"{res[0]}×{res[1]}"
+                rt = fonts["small"].render(rlabel, True, res_col if active_r else GRAY)
+                screen.blit(rt, (rx + rbtn_w // 2 - rt.get_width() // 2,
+                                 RESOL_Y + 18 - rt.get_height() // 2))
+
+            # ── Fullscreen toggle ─────────────────────────────────────────────
+            pygame.draw.line(screen, (45, 45, 65),
+                             (SP_X + 20, FSCRN_Y - 10), (SP_X + SP_W - 20, FSCRN_Y - 10), 1)
+            fs_col = (200, 160, 255)
+            fs_on  = GAME_SETTINGS.fullscreen
+            fs_lbl = fonts["med"].render("Fullscreen", True, WHITE)
+            screen.blit(fs_lbl, (SP_X + 20, FSCRN_Y + 8))
+            fs_pill_x = SP_X + SP_W - 80; fs_pill_y = FSCRN_Y + 4
+            fs_pill_bg = lerp_color(PANEL, fs_col, 0.35 if fs_on else 0.05)
+            pygame.draw.rect(screen, fs_pill_bg,
+                             (fs_pill_x, fs_pill_y, pill_w, pill_h), border_radius=14)
+            pygame.draw.rect(screen, fs_col if fs_on else GRAY,
+                             (fs_pill_x, fs_pill_y, pill_w, pill_h), 2, border_radius=14)
+            fs_knob_x = fs_pill_x + pill_w - 16 if fs_on else fs_pill_x + 12
+            pygame.draw.circle(screen, fs_col if fs_on else GRAY,
+                               (fs_knob_x, fs_pill_y + pill_h // 2), 10)
+            fs_oo = fonts["tiny"].render("ON" if fs_on else "OFF", True, fs_col if fs_on else GRAY)
+            screen.blit(fs_oo, (fs_pill_x + pill_w // 2 - fs_oo.get_width() // 2,
+                                fs_pill_y + pill_h // 2 - fs_oo.get_height() // 2))
+
         # Version label bottom-centre of menu screen
         ver_menu = fonts["tiny"].render(GAME_VERSION, True, (55, 55, 70))
         screen.blit(ver_menu, (SW // 2 - ver_menu.get_width() // 2, SH - 18))
@@ -5996,15 +6257,22 @@ def username_screen(screen, clock, fonts):
         pygame.draw.line(screen, (255, 120, 120), (cx2 - arm, cy2 - arm), (cx2 + arm, cy2 + arm), 2)
         pygame.draw.line(screen, (255, 120, 120), (cx2 + arm, cy2 - arm), (cx2 - arm, cy2 + arm), 2)
 
-        pygame.display.flip()
+        _scaled_flip(screen)
 
 # ── Main Game ─────────────────────────────────────────────────────────────────
 
 class Game:
-    def __init__(self, username="Player"):
-        self.screen   = pygame.display.set_mode((SW, SH))
+    def __init__(self, username="Player", render_surf=None, window=None, apply_display_fn=None):
+        # Use the shared render surface passed from the entry point (fixed 1280×720).
+        # If called without one (e.g. during testing) fall back to the display surface.
+        if render_surf is not None:
+            self.screen = render_surf
+        else:
+            self.screen = pygame.display.set_mode((SW, SH))
+        self._window          = window
+        self._apply_display   = apply_display_fn   # callable() → new window Surface
         self._overlay = pygame.Surface((SW, SH), pygame.SRCALPHA)  # reused every frame
-        pygame.display.set_caption("Dungeon Crawler 42.0b14")
+        pygame.display.set_caption("Dungeon Crawler 43.1b8")
         self.clock    = pygame.time.Clock()
         self.world_w  = 3000; self.world_h = 3000
         self.username = username
@@ -6956,6 +7224,10 @@ class Game:
             pygame.draw.circle(self.screen, YELLOW,
                                (mm_x + int(gc.x / self.world_w * mm),
                                 mm_y + int(gc.y / self.world_h * mm)), 1)
+        for orb in self.hp_orbs:
+            pygame.draw.circle(self.screen, (60, 220, 90),
+                               (mm_x + int(orb.x / self.world_w * mm),
+                                mm_y + int(orb.y / self.world_h * mm)), 2)
         if self.boss and self.boss.alive:
             pygame.draw.circle(self.screen, (255, 60, 60),
                                (mm_x + int(self.boss.x / self.world_w * mm),
@@ -7227,12 +7499,15 @@ class Game:
                 if self.paused and self.pause_settings:
                     if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                         px2, py2 = event.pos
-                        PSX = SW // 2 - 210; PSY = SH // 2 - 130
-                        PSW = 420; PSH = 290
+                        PSX = SW // 2 - 210; PSY = SH // 2 - 230
+                        PSW = 420; PSH = 470
                         SLX = PSX + 80; SLW = PSW - 160
                         SLY  = PSY + 100
                         SLY2 = PSY + 182
                         PQY  = PSY + 242
+                        PHY  = PSY + 298
+                        PRY  = PSY + 358
+                        PFY  = PSY + 418
                         pbw2 = (PSW - 60) // 2
                         if SLX - 10 <= px2 <= SLX + SLW + 10 and SLY - 14 <= py2 <= SLY + 14:
                             self.pause_slider_drag = "music"
@@ -7248,6 +7523,29 @@ class Game:
                               PQY <= py2 <= PQY + 36):
                             GAME_SETTINGS.quality = "high"
                             GAME_SETTINGS.save()
+                        elif (PSX + 20 <= px2 <= PSX + PSW - 20 and
+                              PHY <= py2 <= PHY + 36):
+                            GAME_SETTINGS.player_health_bar = not GAME_SETTINGS.player_health_bar
+                            GAME_SETTINGS.save()
+                        elif PRY <= py2 <= PRY + 36:
+                            res_list_ev = GAME_SETTINGS.RESOLUTIONS
+                            rbtn_wev    = (PSW - 40 - (len(res_list_ev) - 1) * 8) // len(res_list_ev)
+                            for ri, res in enumerate(res_list_ev):
+                                rx_ev = PSX + 20 + ri * (rbtn_wev + 8)
+                                if rx_ev <= px2 <= rx_ev + rbtn_wev:
+                                    if GAME_SETTINGS.resolution != res:
+                                        GAME_SETTINGS.resolution = res
+                                        GAME_SETTINGS.fullscreen  = False
+                                        GAME_SETTINGS.save()
+                                        if self._apply_display:
+                                            self._window = self._apply_display(self._window)
+                                            self.screen  = pygame.display.get_surface()
+                        elif PFY <= py2 <= PFY + 36 and PSX + 20 <= px2 <= PSX + PSW - 20:
+                            GAME_SETTINGS.fullscreen = not GAME_SETTINGS.fullscreen
+                            GAME_SETTINGS.save()
+                            if self._apply_display:
+                                self._window = self._apply_display(self._window)
+                                self.screen  = pygame.display.get_surface()
                         elif not (PSX <= px2 <= PSX + PSW and PSY <= py2 <= PSY + PSH):
                             self.pause_settings = False
                     if event.type == pygame.MOUSEBUTTONUP and event.button == 1:
@@ -7357,7 +7655,7 @@ class Game:
                     vign.fill((0, 0, 0, vign_alpha))
                     self.screen.blit(vign, (0, 0))
                 self.draw_hud()
-                pygame.display.flip()
+                _scaled_flip(self.screen)
                 # When animation ends, trigger game over
                 if self.death_anim_timer == 0:
                     self.game_over = True
@@ -7369,7 +7667,7 @@ class Game:
             if self.game_over:
                 self.draw_world(cam)
                 self.draw_game_over()
-                pygame.display.flip()
+                _scaled_flip(self.screen)
                 continue
 
             if not self.shop.open and not self.perk_screen.active and not self.paused:
@@ -7511,6 +7809,33 @@ class Game:
                         FloatingText(self.boss_clone.x, self.boss_clone.y - 60,
                                      "Clone destroyed!", (255, 80, 220), 20))
                     self.boss_clone = None
+
+                # ── Orbiting void orbs hit detection ───────────────────────────
+                for orb in self.player.void_orbs:
+                    for e in self.enemies:
+                        if not e.alive: continue
+                        if math.hypot(orb.x - e.x, orb.y - e.y) < orb.size + e.size:
+                            e.take_damage(orb.dmg)
+                            self.floating_texts.append(FloatingText(e.x, e.y - 20, f"-{orb.dmg}", RED))
+                            for _ in range(4):
+                                self.particles.append(Particle(orb.x, orb.y, orb.col))
+                            if not e.alive:
+                                self.player.kill_count += 1
+                                SOUNDS.play("enemy_death", volume_scale=0.8)
+                                n_coins = random.randint(1, 3)
+                                per_coin = max(1, e.gold_drop // n_coins)
+                                for _ in range(n_coins):
+                                    self.gold_coins.append(GoldCoin(e.x, e.y, per_coin))
+                                if self.player.gain_xp(e.xp_drop):
+                                    SOUNDS.play("level_up")
+                                    self.floating_texts.append(
+                                        FloatingText(self.player.x, self.player.y - 60,
+                                                     f"LEVEL UP!  {self.player.level}", CYAN, 22))
+                                for _ in range(10):
+                                    self.particles.append(Particle(e.x, e.y, e.color))
+                                if random.random() < 0.10 and len(self.hp_orbs) < 5:
+                                    hp_amt = 10 if e.elite else 5
+                                    self.hp_orbs.append(HpOrb(e.x, e.y, hp_amt))
 
                 # ── Projectiles ────────────────────────────────────────────────
                 for proj in self.projectiles[:]:
@@ -8119,12 +8444,15 @@ class Game:
 
                 # Settings panel (if open)
                 if self.pause_settings:
-                    PSX = SW // 2 - 210; PSY = SH // 2 - 130
-                    PSW = 420;           PSH = 290
+                    PSX = SW // 2 - 210; PSY = SH // 2 - 230
+                    PSW = 420;           PSH = 470
                     SLX = PSX + 80;      SLW = PSW - 160
                     SLY  = PSY + 100     # music slider
                     SLY2 = PSY + 182     # sfx slider
                     PQY  = PSY + 242     # quality toggle row
+                    PHY  = PSY + 298     # player health bar toggle row
+                    PRY  = PSY + 358     # resolution picker row
+                    PFY  = PSY + 418     # fullscreen toggle row
 
                     pygame.draw.rect(self.screen, PANEL,
                                      (PSX, PSY, PSW, PSH), border_radius=14)
@@ -8179,6 +8507,69 @@ class Game:
                         qt = self.fonts["med"].render(qlabel, True, qcol if aq else GRAY)
                         self.screen.blit(qt, (qx + pbw2 // 2 - qt.get_width() // 2,
                                               PQY + 18 - qt.get_height() // 2))
+
+                    # Player health bar toggle
+                    pygame.draw.line(self.screen, (45, 45, 65),
+                                     (PSX + 20, PHY - 10), (PSX + PSW - 20, PHY - 10), 1)
+                    hb_col = (80, 220, 140)
+                    hb_on  = GAME_SETTINGS.player_health_bar
+                    hb_lbl = self.fonts["med"].render("Player Health Bar", True, WHITE)
+                    self.screen.blit(hb_lbl, (PSX + 20, PHY + 8))
+                    pill_x = PSX + PSW - 80; pill_y = PHY + 4
+                    pill_w = 56; pill_h = 28
+                    pill_bg = lerp_color(PANEL, hb_col, 0.35 if hb_on else 0.05)
+                    pygame.draw.rect(self.screen, pill_bg,
+                                     (pill_x, pill_y, pill_w, pill_h), border_radius=14)
+                    pygame.draw.rect(self.screen, hb_col if hb_on else GRAY,
+                                     (pill_x, pill_y, pill_w, pill_h), 2, border_radius=14)
+                    knob_x = pill_x + pill_w - 16 if hb_on else pill_x + 12
+                    pygame.draw.circle(self.screen, hb_col if hb_on else GRAY,
+                                       (knob_x, pill_y + pill_h // 2), 10)
+                    on_off = self.fonts["tiny"].render("ON" if hb_on else "OFF", True, hb_col if hb_on else GRAY)
+                    self.screen.blit(on_off, (pill_x + pill_w // 2 - on_off.get_width() // 2,
+                                              pill_y + pill_h // 2 - on_off.get_height() // 2))
+
+                    # Resolution picker
+                    pygame.draw.line(self.screen, (45, 45, 65),
+                                     (PSX + 20, PRY - 10), (PSX + PSW - 20, PRY - 10), 1)
+                    res_lbl_s = self.fonts["med"].render("Resolution", True, WHITE)
+                    self.screen.blit(res_lbl_s, (PSX + 20, PRY + 8))
+                    res_list_p = GAME_SETTINGS.RESOLUTIONS
+                    rbtn_wp    = (PSW - 40 - (len(res_list_p) - 1) * 8) // len(res_list_p)
+                    res_col_p  = (100, 180, 255)
+                    for ri, res in enumerate(res_list_p):
+                        rx_p     = PSX + 20 + ri * (rbtn_wp + 8)
+                        active_r = (GAME_SETTINGS.resolution == res and not GAME_SETTINGS.fullscreen)
+                        rbg_p    = lerp_color(PANEL, res_col_p, 0.3 if active_r else 0.05)
+                        pygame.draw.rect(self.screen, rbg_p,
+                                         (rx_p, PRY, rbtn_wp, 36), border_radius=8)
+                        pygame.draw.rect(self.screen, res_col_p if active_r else GRAY,
+                                         (rx_p, PRY, rbtn_wp, 36), 2 if active_r else 1, border_radius=8)
+                        rlbl_p = self.fonts["small"].render(f"{res[0]}×{res[1]}", True,
+                                                            res_col_p if active_r else GRAY)
+                        self.screen.blit(rlbl_p, (rx_p + rbtn_wp // 2 - rlbl_p.get_width() // 2,
+                                                   PRY + 18 - rlbl_p.get_height() // 2))
+
+                    # Fullscreen toggle
+                    pygame.draw.line(self.screen, (45, 45, 65),
+                                     (PSX + 20, PFY - 10), (PSX + PSW - 20, PFY - 10), 1)
+                    fs_col_p = (200, 160, 255)
+                    fs_on_p  = GAME_SETTINGS.fullscreen
+                    fs_lbl_p = self.fonts["med"].render("Fullscreen", True, WHITE)
+                    self.screen.blit(fs_lbl_p, (PSX + 20, PFY + 8))
+                    fp_x = PSX + PSW - 80; fp_y = PFY + 4
+                    fp_bg = lerp_color(PANEL, fs_col_p, 0.35 if fs_on_p else 0.05)
+                    pygame.draw.rect(self.screen, fp_bg,
+                                     (fp_x, fp_y, pill_w, pill_h), border_radius=14)
+                    pygame.draw.rect(self.screen, fs_col_p if fs_on_p else GRAY,
+                                     (fp_x, fp_y, pill_w, pill_h), 2, border_radius=14)
+                    fk_x = fp_x + pill_w - 16 if fs_on_p else fp_x + 12
+                    pygame.draw.circle(self.screen, fs_col_p if fs_on_p else GRAY,
+                                       (fk_x, fp_y + pill_h // 2), 10)
+                    fs_oo_p = self.fonts["tiny"].render("ON" if fs_on_p else "OFF", True,
+                                                        fs_col_p if fs_on_p else GRAY)
+                    self.screen.blit(fs_oo_p, (fp_x + pill_w // 2 - fs_oo_p.get_width() // 2,
+                                               fp_y + pill_h // 2 - fs_oo_p.get_height() // 2))
 
                     close_h = self.fonts["tiny"].render(
                         "Click outside or press P / ESC to close", True, GRAY)
@@ -8327,14 +8718,53 @@ class Game:
                     ctitle.set_alpha(banner_alpha)
                     self.screen.blit(ctitle, (SW // 2 - ctitle.get_width() // 2, by2 + 14))
 
-            pygame.display.flip()
+            _scaled_flip(self.screen)
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
+def apply_display_mode(current_window):
+    """
+    Create (or recreate) the pygame display window according to GAME_SETTINGS.
+    Returns the new window Surface.  The game always renders to the fixed
+    SW×SH (1280×720) virtual canvas and the main loop scales it up.
+
+    Using pygame.SCALED in windowed mode lets pygame automatically map raw
+    mouse coordinates back to the virtual canvas, fixing click offsets at
+    non-native resolutions.  For fullscreen we use FULLSCREEN|SCALED which
+    does the same thing.  If the first set_mode call fails (common on Windows
+    when toggling fullscreen mid-session), we reinitialise the display module
+    and try once more before falling back to safe windowed 1280×720.
+    """
+    if GAME_SETTINGS.fullscreen:
+        flags = pygame.FULLSCREEN | pygame.SCALED
+        try:
+            win = pygame.display.set_mode((SW, SH), flags)
+        except pygame.error:
+            # Toggling fullscreen can fail on Windows — reinit display and retry
+            pygame.display.quit()
+            pygame.display.init()
+            try:
+                win = pygame.display.set_mode((SW, SH), flags)
+            except pygame.error:
+                # Final fallback: safe windowed mode
+                GAME_SETTINGS.fullscreen = False
+                GAME_SETTINGS.save()
+                win = pygame.display.set_mode((SW, SH), pygame.SCALED)
+    else:
+        win_w, win_h = GAME_SETTINGS.resolution
+        # SCALED tells pygame to stretch the logical (SW×SH) surface to fill
+        # the window AND remap mouse events — fixes click offsets automatically.
+        try:
+            win = pygame.display.set_mode((win_w, win_h), pygame.SCALED)
+        except pygame.error:
+            win = pygame.display.set_mode((SW, SH), pygame.SCALED)
+    return win
+
+
 if __name__ == "__main__":
-    _screen = pygame.display.set_mode((SW, SH))
-    pygame.display.set_caption("Dungeon Crawler 42.0b14")
+    _window = apply_display_mode(None)
+    pygame.display.set_caption("Dungeon Crawler 43.1b8")
 
     # Window icon
     _icon_path = asset("icon.png")
@@ -8353,5 +8783,17 @@ if __name__ == "__main__":
         "huge":  _make_font(48, bold=True),
     }
     while True:
+        # With pygame.SCALED active, the display surface is the 1280×720 logical
+        # canvas — draw directly to it so SCALED's mouse remapping works correctly.
+        _screen = pygame.display.get_surface()
         chosen_name = username_screen(_screen, _clock, _fonts)
-        Game(username=chosen_name).run()
+
+        # Re-apply display mode in case settings changed during the menu,
+        # then fetch the (possibly new) display surface for the game.
+        _window = apply_display_mode(_window)
+        _screen = pygame.display.get_surface()
+
+        result = Game(username=chosen_name, render_surf=_screen,
+                      window=_window, apply_display_fn=apply_display_mode).run()
+        # result == "menu" → loop back; re-apply in case settings changed in-game
+        _window = apply_display_mode(_window)
