@@ -83,9 +83,8 @@ class Music:
         boss_seraphix.ogg   – Seraphix the Fallen
         boss_nyxoth.ogg     – Nyxoth the Abyssal
 
-    Place your icon and logo files alongside the script too:
+    Place icon file in "assets" folder:
         icon.png            – window icon (32×32 or 64×64 recommended)
-        logo.png            – splash logo on the main menu
     """
 
     # Map boss names (lowercase, no spaces) to track filenames
@@ -528,12 +527,6 @@ FIRST_RUN_FILE = os.path.join(DATA_DIR, "first_run.json")
 
 class GameSettings:
     """Persists quality, volume, display settings across launches."""
-    # Supported windowed resolutions (width, height) — all 16:9
-    RESOLUTIONS = [
-        (1280, 720),
-        #(1600, 900),
-        #(1920, 1080),
-    ]
 
     def __init__(self):
         data = self._load()
@@ -541,11 +534,6 @@ class GameSettings:
         self.music_volume       = float(data.get("music_volume",  0.5))
         self.sounds_volume      = float(data.get("sounds_volume", 0.6))
         self.player_health_bar  = bool(data.get("player_health_bar", False))
-        # Display settings
-        res_raw                 = data.get("resolution", [1280, 720])
-        self.resolution         = tuple(res_raw) if isinstance(res_raw, list) else (1280, 720)
-        if self.resolution not in self.RESOLUTIONS:
-            self.resolution = (1280, 720)
         self.fullscreen         = bool(data.get("fullscreen", False))
 
     def _load(self):
@@ -563,7 +551,6 @@ class GameSettings:
                     "music_volume":      MUSIC.volume,
                     "sounds_volume":     SOUNDS.volume,
                     "player_health_bar": self.player_health_bar,
-                    "resolution":        list(self.resolution),
                     "fullscreen":        self.fullscreen,
                 }, f, indent=2)
         except Exception as e:
@@ -596,7 +583,7 @@ DARK   = (18, 18, 28)
 PANEL  = (28, 28, 42)
 
 WAVE_BREAK_SECS = 10
-GAME_VERSION    = "43.1b8"
+GAME_VERSION    = "43.1b13"
 
 # ── Online version check ──────────────────────────────────────────────────────
 _GH_API_URL  = ""#"https://api.github.com/repos/gert-leja/dungeon_crawler/releases"
@@ -688,9 +675,13 @@ PATCH_NOTES = [
         "version": "43.1",
         "date":    "24-03-2026",
         "changes": [
-            ("removed",   "Resolution options are currently running into an issue with scaling, so they are removed in this update."),
+            ("removed",   "Resolution options removed."),
             ("fixed",   "Fullscreen crashing the game when selected."),
-            ("changed",   "Main menu song has been changed."),
+            ("fixed",   "Void Orbiter crashing the game when mouse is released."),
+            ("changed",   "Main menu and battle songs have been changed."),
+            ("changed",   "Red Orb enemy's speed has slightly increased from 0.85 to 1.05."),
+            ("changed",   "Regen perk has been changed to 'Lifesteal'."),
+            ("changed",   "Void Orbiter's fire interval is doubled."),
         ],
     },
     {
@@ -907,7 +898,7 @@ WEAPONS = [
     {
         "name": "Void Orbiter",    "damage": 55,  "speed": 0.50, "range": 750,
         "cost": 750,  "req_lvl": 12, "color": (160, 0, 220),
-        "proj_size": 8,  "behaviour": "orbit",    "fire_interval": 50,
+        "proj_size": 8,  "behaviour": "orbit",    "fire_interval": 120,
         "desc": "Orbs orbit outwards",
     },
     {
@@ -957,7 +948,7 @@ ENEMY_TYPES = [
     # Goblin — fast, dashes at player every few seconds
     {"name": "Goblin",   "base_hp": 55,  "base_dmg": 10, "base_spd": 1.8,  "gold": 6,  "color": ORANGE,        "size": 15, "xp": 22,  "behaviour": "dash"},
     # Orc — slow tank that briefly spins and fires 6 projectiles when hurt below 50 %
-    {"name": "Orc",      "base_hp": 140, "base_dmg": 18, "base_spd": 0.85, "gold": 12, "color": RED,           "size": 22, "xp": 45,  "behaviour": "tank"},
+    {"name": "Orc",      "base_hp": 140, "base_dmg": 18, "base_spd": 1.05, "gold": 12, "color": RED,           "size": 22, "xp": 45,  "behaviour": "tank"},
     # Mage — keeps distance, fires 3-way spread, occasionally blinks sideways
     {"name": "Mage",     "base_hp": 75,  "base_dmg": 22, "base_spd": 0.85, "gold": 16, "color": PURPLE,        "size": 17, "xp": 60,  "behaviour": "mage"},
     # Dragon — slow, fires aimed double-shot + drops a lingering fire orb on tile
@@ -1063,7 +1054,7 @@ ALL_PERKS = [
     {"key": "dmg_pct",    "label": "Damage",      "bonus": 0.08, "icon": "+",  "color": ORANGE,       "desc": "+8% bullet damage"},
     {"key": "defense",    "label": "Defense",     "bonus": 0.08, "icon": "D",  "color": BLUE,         "desc": "-8% damage taken"},
     {"key": "speed_pct",  "label": "Speed",       "bonus": 0.06, "icon": ">>", "color": CYAN,         "desc": "+6% move speed"},
-    {"key": "hp_regen",   "label": "Regen",       "bonus": 1,    "icon": "+",  "color": GREEN,        "desc": "+1 HP per 3s"},
+    {"key": "hp_regen",   "label": "Lifesteal",    "bonus": 0.1,  "icon": "+",  "color": GREEN,        "desc": "+0.1 HP per hit on enemy"},
     {"key": "max_hp_pct", "label": "Vitality",    "bonus": 0.10, "icon": "H",  "color": RED,          "desc": "+10% max HP"},
     {"key": "gold_pct",   "label": "Greed",       "bonus": 0.15, "icon": "G",  "color": YELLOW,       "desc": "+15% gold drops"},
     {"key": "range_pct",  "label": "Range",       "bonus": 0.10, "icon": "~",  "color": PURPLE,       "desc": "+10% bullet range"},
@@ -1348,7 +1339,7 @@ class VoidOrbiterOrb:
         self.vy = 0.0
         self.dist = 0.0
 
-    def update(self, mouse_held):
+    def update(self, mouse_held=False):
         if self.orbiting:
             self.angle    += self.SPIN_RATE
             self.orbit_r  += self.ORBIT_EXPAND
@@ -1460,6 +1451,7 @@ class Player:
         self.dash_vy        = 0.0
         self.dash_trail     = []       # list of (x, y, alpha) for afterimage
         self.hurt_flash     = 0        # counts down only on damage, drives cosmetic flicker
+        self.lifesteal_acc  = 0.0      # accumulates fractional lifesteal HP until a whole point is ready
 
         # Void Orbiter state
         self.void_orbs       = []      # active VoidOrbiterOrbs currently orbiting
@@ -1699,13 +1691,6 @@ class Player:
             self.iframes -= 1
         if self.hurt_flash > 0:
             self.hurt_flash -= 1
-        # HP regen tick
-        regen = self.perk("hp_regen")
-        if regen > 0:
-            self.regen_timer += 1
-            if self.regen_timer >= 180:
-                self.regen_timer = 0
-                self.hp = min(self.max_hp, self.hp + int(regen))
 
     def draw(self, surf, cam, font_small, font_tiny):
         sx = int(self.x - cam[0]); sy = int(self.y - cam[1])
@@ -5055,7 +5040,7 @@ class PerkScreen:
                 stacks     = int(self.player.perk(perk["key"]) / perk["bonus"] + 0.5)
                 future_val = self.player.perk(perk["key"]) + perk["bonus"]
                 if perk["key"] == "hp_regen":
-                    future_str = f"Total: +{int(future_val)} HP/3s"
+                    future_str = f"Total: +{future_val:.1f} HP/hit"
                 else:
                     future_str = f"Total: +{int(future_val * 100)}%"
                 if stacks > 0:
@@ -5260,7 +5245,7 @@ class PerkScreen:
             # ── Future total preview ──────────────────────────────────────────
             future_val = self.player.perk(perk["key"]) + perk["bonus"]
             if perk["key"] == "hp_regen":
-                future_str = f"+{int(future_val)} HP / 3s after pick"
+                future_str = f"+{future_val:.1f} HP/hit after pick"
             else:
                 future_str = f"+{int(future_val * 100)}%  after pick"
             fv_col  = lerp_color((120, 120, 135), col, 0.55)
@@ -5380,7 +5365,7 @@ def username_screen(screen, clock, fonts):
     }
 
     # Settings panel geometry (defined here so hit-tests work before first draw)
-    SP_W, SP_H = 420, 540   # taller to fit display settings rows
+    SP_W, SP_H = 420, 470   # height covers sliders + quality + health bar + fullscreen
     SP_X = SW // 2 - SP_W // 2
     SP_Y = SH // 2 - SP_H // 2
     SLIDER_X    = SP_X + 80
@@ -5389,8 +5374,7 @@ def username_screen(screen, clock, fonts):
     SLIDER2_Y   = SP_Y + 195    # sfx slider Y
     QUALITY_Y   = SP_Y + 268    # quality toggle Y
     HEALTHBAR_Y = SP_Y + 328    # player health bar toggle Y
-    RESOL_Y     = SP_Y + 388    # resolution picker Y
-    FSCRN_Y     = SP_Y + 468    # fullscreen toggle Y
+    FSCRN_Y     = SP_Y + 398    # fullscreen toggle Y
 
     def vol_to_x(vol):
         return int(SLIDER_X + vol * SLIDER_W)
@@ -5455,19 +5439,6 @@ def username_screen(screen, clock, fonts):
                             HEALTHBAR_Y <= py <= HEALTHBAR_Y + 36):
                         GAME_SETTINGS.player_health_bar = not GAME_SETTINGS.player_health_bar
                         GAME_SETTINGS.save()
-                    elif RESOL_Y <= py <= RESOL_Y + 36:
-                        # Resolution buttons — 3 options side by side
-                        res_list = GAME_SETTINGS.RESOLUTIONS
-                        rbtn_w   = (SP_W - 40 - (len(res_list) - 1) * 8) // len(res_list)
-                        for ri, res in enumerate(res_list):
-                            rx = SP_X + 20 + ri * (rbtn_w + 8)
-                            if rx <= px <= rx + rbtn_w:
-                                if GAME_SETTINGS.resolution != res:
-                                    GAME_SETTINGS.resolution = res
-                                    GAME_SETTINGS.fullscreen  = False
-                                    GAME_SETTINGS.save()
-                                    apply_display_mode(None)
-                                    screen = pygame.display.get_surface()
                     elif FSCRN_Y <= py <= FSCRN_Y + 36:
                         if SP_X + 20 <= px <= SP_X + SP_W - 20:
                             GAME_SETTINGS.fullscreen = not GAME_SETTINGS.fullscreen
@@ -6074,26 +6045,6 @@ def username_screen(screen, clock, fonts):
             screen.blit(on_off, (pill_x + pill_w // 2 - on_off.get_width() // 2,
                                   pill_y + pill_h // 2 - on_off.get_height() // 2))
 
-            # ── Resolution picker ─────────────────────────────────────────────
-            pygame.draw.line(screen, (45, 45, 65),
-                             (SP_X + 20, RESOL_Y - 10), (SP_X + SP_W - 20, RESOL_Y - 10), 1)
-            res_lbl = fonts["med"].render("Resolution", True, WHITE)
-            screen.blit(res_lbl, (SP_X + 20, RESOL_Y + 8))
-            res_list = GAME_SETTINGS.RESOLUTIONS
-            rbtn_w   = (SP_W - 40 - (len(res_list) - 1) * 8) // len(res_list)
-            res_col  = (100, 180, 255)
-            for ri, res in enumerate(res_list):
-                rx       = SP_X + 20 + ri * (rbtn_w + 8)
-                active_r = (GAME_SETTINGS.resolution == res and not GAME_SETTINGS.fullscreen)
-                rbg      = lerp_color(PANEL, res_col, 0.3 if active_r else 0.05)
-                pygame.draw.rect(screen, rbg,  (rx, RESOL_Y, rbtn_w, 36), border_radius=8)
-                pygame.draw.rect(screen, res_col if active_r else GRAY,
-                                 (rx, RESOL_Y, rbtn_w, 36), 2 if active_r else 1, border_radius=8)
-                rlabel = f"{res[0]}×{res[1]}"
-                rt = fonts["small"].render(rlabel, True, res_col if active_r else GRAY)
-                screen.blit(rt, (rx + rbtn_w // 2 - rt.get_width() // 2,
-                                 RESOL_Y + 18 - rt.get_height() // 2))
-
             # ── Fullscreen toggle ─────────────────────────────────────────────
             pygame.draw.line(screen, (45, 45, 65),
                              (SP_X + 20, FSCRN_Y - 10), (SP_X + SP_W - 20, FSCRN_Y - 10), 1)
@@ -6272,7 +6223,7 @@ class Game:
         self._window          = window
         self._apply_display   = apply_display_fn   # callable() → new window Surface
         self._overlay = pygame.Surface((SW, SH), pygame.SRCALPHA)  # reused every frame
-        pygame.display.set_caption("Dungeon Crawler 43.1b8")
+        pygame.display.set_caption("Dungeon Crawler 43.1b13")
         self.clock    = pygame.time.Clock()
         self.world_w  = 3000; self.world_h = 3000
         self.username = username
@@ -7199,7 +7150,7 @@ class Game:
                 col    = pdef["color"]
                 # Format value correctly: regen is raw HP, dash is stacks, others are percentages
                 if key == "hp_regen":
-                    val_str = f"+{int(val)} HP/3s"
+                    val_str = f"+{val:.1f} HP/hit"
                 elif key == "dash":
                     val_str = f"x{stacks} upgraded"
                 else:
@@ -7527,19 +7478,6 @@ class Game:
                               PHY <= py2 <= PHY + 36):
                             GAME_SETTINGS.player_health_bar = not GAME_SETTINGS.player_health_bar
                             GAME_SETTINGS.save()
-                        elif PRY <= py2 <= PRY + 36:
-                            res_list_ev = GAME_SETTINGS.RESOLUTIONS
-                            rbtn_wev    = (PSW - 40 - (len(res_list_ev) - 1) * 8) // len(res_list_ev)
-                            for ri, res in enumerate(res_list_ev):
-                                rx_ev = PSX + 20 + ri * (rbtn_wev + 8)
-                                if rx_ev <= px2 <= rx_ev + rbtn_wev:
-                                    if GAME_SETTINGS.resolution != res:
-                                        GAME_SETTINGS.resolution = res
-                                        GAME_SETTINGS.fullscreen  = False
-                                        GAME_SETTINGS.save()
-                                        if self._apply_display:
-                                            self._window = self._apply_display(self._window)
-                                            self.screen  = pygame.display.get_surface()
                         elif PFY <= py2 <= PFY + 36 and PSX + 20 <= px2 <= PSX + PSW - 20:
                             GAME_SETTINGS.fullscreen = not GAME_SETTINGS.fullscreen
                             GAME_SETTINGS.save()
@@ -7851,6 +7789,7 @@ class Game:
                                 pass  # cannot hit boss during either cinematic
                             elif math.hypot(proj.x - self.boss.x, proj.y - self.boss.y) < proj.size + self.boss.size:
                                 self.boss.take_damage(proj.dmg)
+                                self.player.lifesteal_acc += self.player.perk("hp_regen"); heal = int(self.player.lifesteal_acc); self.player.lifesteal_acc -= heal; self.player.hp = min(self.player.max_hp, self.player.hp + heal)
                                 self.floating_texts.append(FloatingText(self.boss.x, self.boss.y - 30, f"-{proj.dmg}", (255, 100, 100)))
                                 for _ in range(5):
                                     self.particles.append(Particle(proj.x, proj.y, self.boss.proj_col))
@@ -7866,6 +7805,7 @@ class Game:
                         if self.boss_clone and self.boss_clone.alive:
                             if math.hypot(proj.x - self.boss_clone.x, proj.y - self.boss_clone.y) < proj.size + self.boss_clone.size:
                                 self.boss_clone.take_damage(proj.dmg)
+                                self.player.lifesteal_acc += self.player.perk("hp_regen"); heal = int(self.player.lifesteal_acc); self.player.lifesteal_acc -= heal; self.player.hp = min(self.player.max_hp, self.player.hp + heal)
                                 self.floating_texts.append(
                                     FloatingText(self.boss_clone.x, self.boss_clone.y - 30,
                                                  f"-{proj.dmg}", (255, 100, 100)))
@@ -7878,6 +7818,7 @@ class Game:
                             for m in self.boss.minions:
                                 if m.alive and math.hypot(proj.x - m.x, proj.y - m.y) < proj.size + m.SIZE:
                                     m.take_damage(proj.dmg)
+                                    self.player.lifesteal_acc += self.player.perk("hp_regen"); heal = int(self.player.lifesteal_acc); self.player.lifesteal_acc -= heal; self.player.hp = min(self.player.max_hp, self.player.hp + heal)
                                     self.floating_texts.append(FloatingText(m.x, m.y - 18, f"-{proj.dmg}", (120, 220, 120)))
                                     for _ in range(5):
                                         self.particles.append(Particle(proj.x, proj.y, (120, 220, 120)))
@@ -7892,6 +7833,7 @@ class Game:
                             if is_pierce and hasattr(proj, 'hit_ids') and e.etype in proj.hit_ids: continue
                             if math.hypot(proj.x - e.x, proj.y - e.y) < proj.size + e.size:
                                 e.take_damage(proj.dmg)
+                                self.player.lifesteal_acc += self.player.perk("hp_regen"); heal = int(self.player.lifesteal_acc); self.player.lifesteal_acc -= heal; self.player.hp = min(self.player.max_hp, self.player.hp + heal)
                                 self.floating_texts.append(FloatingText(e.x, e.y - 20, f"-{proj.dmg}", RED))
                                 for _ in range(6):
                                     self.particles.append(Particle(proj.x, proj.y, proj.col))
@@ -8444,15 +8386,14 @@ class Game:
 
                 # Settings panel (if open)
                 if self.pause_settings:
-                    PSX = SW // 2 - 210; PSY = SH // 2 - 230
-                    PSW = 420;           PSH = 470
+                    PSX = SW // 2 - 210; PSY = SH // 2 - 190
+                    PSW = 420;           PSH = 390
                     SLX = PSX + 80;      SLW = PSW - 160
                     SLY  = PSY + 100     # music slider
                     SLY2 = PSY + 182     # sfx slider
                     PQY  = PSY + 242     # quality toggle row
                     PHY  = PSY + 298     # player health bar toggle row
-                    PRY  = PSY + 358     # resolution picker row
-                    PFY  = PSY + 418     # fullscreen toggle row
+                    PFY  = PSY + 354     # fullscreen toggle row
 
                     pygame.draw.rect(self.screen, PANEL,
                                      (PSX, PSY, PSW, PSH), border_radius=14)
@@ -8528,27 +8469,6 @@ class Game:
                     on_off = self.fonts["tiny"].render("ON" if hb_on else "OFF", True, hb_col if hb_on else GRAY)
                     self.screen.blit(on_off, (pill_x + pill_w // 2 - on_off.get_width() // 2,
                                               pill_y + pill_h // 2 - on_off.get_height() // 2))
-
-                    # Resolution picker
-                    pygame.draw.line(self.screen, (45, 45, 65),
-                                     (PSX + 20, PRY - 10), (PSX + PSW - 20, PRY - 10), 1)
-                    res_lbl_s = self.fonts["med"].render("Resolution", True, WHITE)
-                    self.screen.blit(res_lbl_s, (PSX + 20, PRY + 8))
-                    res_list_p = GAME_SETTINGS.RESOLUTIONS
-                    rbtn_wp    = (PSW - 40 - (len(res_list_p) - 1) * 8) // len(res_list_p)
-                    res_col_p  = (100, 180, 255)
-                    for ri, res in enumerate(res_list_p):
-                        rx_p     = PSX + 20 + ri * (rbtn_wp + 8)
-                        active_r = (GAME_SETTINGS.resolution == res and not GAME_SETTINGS.fullscreen)
-                        rbg_p    = lerp_color(PANEL, res_col_p, 0.3 if active_r else 0.05)
-                        pygame.draw.rect(self.screen, rbg_p,
-                                         (rx_p, PRY, rbtn_wp, 36), border_radius=8)
-                        pygame.draw.rect(self.screen, res_col_p if active_r else GRAY,
-                                         (rx_p, PRY, rbtn_wp, 36), 2 if active_r else 1, border_radius=8)
-                        rlbl_p = self.fonts["small"].render(f"{res[0]}×{res[1]}", True,
-                                                            res_col_p if active_r else GRAY)
-                        self.screen.blit(rlbl_p, (rx_p + rbtn_wp // 2 - rlbl_p.get_width() // 2,
-                                                   PRY + 18 - rlbl_p.get_height() // 2))
 
                     # Fullscreen toggle
                     pygame.draw.line(self.screen, (45, 45, 65),
@@ -8727,44 +8647,32 @@ def apply_display_mode(current_window):
     """
     Create (or recreate) the pygame display window according to GAME_SETTINGS.
     Returns the new window Surface.  The game always renders to the fixed
-    SW×SH (1280×720) virtual canvas and the main loop scales it up.
-
-    Using pygame.SCALED in windowed mode lets pygame automatically map raw
-    mouse coordinates back to the virtual canvas, fixing click offsets at
-    non-native resolutions.  For fullscreen we use FULLSCREEN|SCALED which
-    does the same thing.  If the first set_mode call fails (common on Windows
-    when toggling fullscreen mid-session), we reinitialise the display module
-    and try once more before falling back to safe windowed 1280×720.
+    SW×SH (1280×720) virtual canvas.  pygame.SCALED handles physical scaling
+    and remaps mouse coordinates automatically.
     """
     if GAME_SETTINGS.fullscreen:
         flags = pygame.FULLSCREEN | pygame.SCALED
+    else:
+        flags = pygame.SCALED
+    try:
+        win = pygame.display.set_mode((SW, SH), flags)
+    except pygame.error:
+        # Toggling fullscreen can fail on Windows — reinit display and retry
+        pygame.display.quit()
+        pygame.display.init()
         try:
             win = pygame.display.set_mode((SW, SH), flags)
         except pygame.error:
-            # Toggling fullscreen can fail on Windows — reinit display and retry
-            pygame.display.quit()
-            pygame.display.init()
-            try:
-                win = pygame.display.set_mode((SW, SH), flags)
-            except pygame.error:
-                # Final fallback: safe windowed mode
-                GAME_SETTINGS.fullscreen = False
-                GAME_SETTINGS.save()
-                win = pygame.display.set_mode((SW, SH), pygame.SCALED)
-    else:
-        win_w, win_h = GAME_SETTINGS.resolution
-        # SCALED tells pygame to stretch the logical (SW×SH) surface to fill
-        # the window AND remap mouse events — fixes click offsets automatically.
-        try:
-            win = pygame.display.set_mode((win_w, win_h), pygame.SCALED)
-        except pygame.error:
+            # Final fallback: safe windowed mode
+            GAME_SETTINGS.fullscreen = False
+            GAME_SETTINGS.save()
             win = pygame.display.set_mode((SW, SH), pygame.SCALED)
     return win
 
 
 if __name__ == "__main__":
     _window = apply_display_mode(None)
-    pygame.display.set_caption("Dungeon Crawler 43.1b8")
+    pygame.display.set_caption("Dungeon Crawler 43.1b13")
 
     # Window icon
     _icon_path = asset("icon.png")
