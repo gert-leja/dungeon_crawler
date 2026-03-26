@@ -583,7 +583,7 @@ DARK   = (18, 18, 28)
 PANEL  = (28, 28, 42)
 
 WAVE_BREAK_SECS = 10
-GAME_VERSION    = "43.1b13"
+GAME_VERSION    = "43.2b1"
 
 # ── Online version check ──────────────────────────────────────────────────────
 _GH_API_URL  = ""#"https://api.github.com/repos/gert-leja/dungeon_crawler/releases"
@@ -672,8 +672,16 @@ threading.Thread(target=_fetch_latest_release, daemon=True).start()
 # Categories: "added", "changed", "fixed", "removed"
 PATCH_NOTES = [
     {
+        "version": "43.2",
+        "date":    "26-03-2026",
+        "changes": [
+            ("added",   "'Help' button in the main menu that displays the tutorial."),
+            ("changed", "Updated tutorial information."),
+        ],
+    },
+    {
         "version": "43.1",
-        "date":    "24-03-2026",
+        "date":    "25-03-2026",
         "changes": [
             ("removed",   "Resolution options removed."),
             ("fixed",   "Fullscreen crashing the game when selected."),
@@ -682,21 +690,6 @@ PATCH_NOTES = [
             ("changed",   "Red Orb enemy's speed has slightly increased from 0.85 to 1.05."),
             ("changed",   "Regen perk has been changed to 'Lifesteal'."),
             ("changed",   "Void Orbiter's fire interval is doubled."),
-        ],
-    },
-    {
-        "version": "43.0",
-        "date":    "24-03-2026",
-        "changes": [
-            ("added",   "Settings now has a toggle for a health bar to be visible for the player (defaults to False)."),
-            ("added",   "HP Orbs now show up on the minimap."),
-            ("added",   "Settings has a toggle for fullscreen/windowed mode and the ability to change resolution."),
-            ("changed", "The Stormborn cosmetic has recieved a visual change."),
-            ("changed", "Gold and HP Orbs get automatically added to the player after 10 seconds."),
-            ("changed", "Void Orbiter and Scattershot have been reworked."),
-            ("changed", "Game logo has been updated, along with some new assets."),
-            ("fixed",   "Cosmetics flickering during dash. (Issue #4 on GitHub)"),
-            ("removed", "Tried to remove Herobrine."),
         ],
     },
 ]
@@ -5312,7 +5305,8 @@ def username_screen(screen, clock, fonts):
     show_settings = False
     show_patchnotes = False
     show_credits  = False
-    show_tutorial = False   # shown once on first ever play
+    show_tutorial = False   # shown once on first ever play, or via Help button
+    show_help     = False   # True when Help button clicked (distinct from first-run auto-show)
     tutorial_page = 0       # 0 = controls, 1 = mechanics
     credits_page  = 0
     slider_drag   = False
@@ -5387,6 +5381,7 @@ def username_screen(screen, clock, fonts):
     pn_rect       = pygame.Rect(0, 0, 1, 1)
     settings_rect = pygame.Rect(0, 0, 1, 1)
     credits_rect  = pygame.Rect(0, 0, 1, 1)
+    help_rect     = pygame.Rect(0, 0, 1, 1)
     update_rect   = pygame.Rect(0, 0, 1, 1)   # clickable download button in update strip
     close_rect    = pygame.Rect(SW - 48, 8, 36, 36)
     play_rect     = None
@@ -5480,9 +5475,17 @@ def username_screen(screen, clock, fonts):
                         tutorial_page = 1
                     elif event.key in (pygame.K_LEFT, pygame.K_a) and tutorial_page == 1:
                         tutorial_page = 0
-                    elif event.key in (pygame.K_RETURN, pygame.K_ESCAPE) and tutorial_page == 1:
-                        if menu_video[0]: menu_video[0].release()
-                        return username.strip()
+                    elif event.key in (pygame.K_RETURN, pygame.K_ESCAPE):
+                        if tutorial_page == 1:
+                            if show_help:
+                                show_tutorial = False
+                                show_help     = False
+                            else:
+                                if menu_video[0]: menu_video[0].release()
+                                return username.strip()
+                        elif event.key == pygame.K_ESCAPE:
+                            show_tutorial = False
+                            show_help     = False
                 if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                     mx_t, my_t = event.pos
                     TW, TH = 720, 480
@@ -5494,8 +5497,12 @@ def username_screen(screen, clock, fonts):
                     elif tutorial_page == 1 and prev_btn.collidepoint(mx_t, my_t):
                         tutorial_page = 0
                     elif tutorial_page == 1 and next_btn.collidepoint(mx_t, my_t):
-                        if menu_video[0]: menu_video[0].release()
-                        return username.strip()
+                        if show_help:
+                            show_tutorial = False
+                            show_help     = False
+                        else:
+                            if menu_video[0]: menu_video[0].release()
+                            return username.strip()
                 continue
 
             # ── Credits overlay ────────────────────────────────────────────
@@ -5540,6 +5547,10 @@ def username_screen(screen, clock, fonts):
                 elif credits_rect.collidepoint(px, py):
                     show_credits = True
                     credits_page = 0
+                elif help_rect.collidepoint(px, py):
+                    show_tutorial = True
+                    show_help     = True
+                    tutorial_page = 0
                 elif settings_rect.collidepoint(px, py):
                     show_settings = True
                 elif play_rect and play_rect.collidepoint(px, py) and username.strip():
@@ -5740,21 +5751,23 @@ def username_screen(screen, clock, fonts):
         display_text = username + ("|" if cursor_blink % 60 < 30 else "")
         screen.blit(fonts["large"].render(display_text, True, WHITE), (box_x + 14, box_y + 12))
 
-        # Three top buttons + Credits button below
+        # Four top buttons
         btn_y    = box_y + box_h + 16
         btn_h    = 36
-        btn_w    = 178
-        gap      = 10
-        total_w  = btn_w * 3 + gap * 2
+        btn_w    = 130
+        gap      = 8
+        total_w  = btn_w * 4 + gap * 3
         lb_rect       = pygame.Rect(SW // 2 - total_w // 2,               btn_y, btn_w, btn_h)
-        pn_rect       = pygame.Rect(SW // 2 - total_w // 2 + btn_w + gap, btn_y, btn_w, btn_h)
+        pn_rect       = pygame.Rect(SW // 2 - total_w // 2 + (btn_w + gap),     btn_y, btn_w, btn_h)
         settings_rect = pygame.Rect(SW // 2 - total_w // 2 + (btn_w + gap) * 2, btn_y, btn_w, btn_h)
+        help_rect     = pygame.Rect(SW // 2 - total_w // 2 + (btn_w + gap) * 3, btn_y, btn_w, btn_h)
         credits_rect  = pygame.Rect(SW // 2 - btn_w // 2, btn_y + btn_h + 8, btn_w, btn_h)
 
         for rect, label, col in [
             (lb_rect,       "Leaderboard",  YELLOW),
             (pn_rect,       "Patch Notes",  (100, 220, 160)),
             (settings_rect, "Settings",     (140, 180, 255)),
+            (help_rect,     "Help",         (255, 180, 80)),
         ]:
             pygame.draw.rect(screen, lerp_color(PANEL, col, 0.15), rect, border_radius=8)
             pygame.draw.rect(screen, col, rect, 1, border_radius=8)
@@ -6081,7 +6094,7 @@ def username_screen(screen, clock, fonts):
             pygame.draw.rect(screen, PANEL, (TX, TY, TW, TH), border_radius=14)
             pygame.draw.rect(screen, CYAN,  (TX, TY, TW, TH), 2, border_radius=14)
 
-            ttitle = fonts["large"].render("Welcome to Dungeon Crawler!", True, CYAN)
+            ttitle = fonts["large"].render("How to Play", True, CYAN)
             screen.blit(ttitle, (TX + TW // 2 - ttitle.get_width() // 2, TY + 16))
             pygame.draw.line(screen, (50, 50, 80), (TX + 16, TY + 50), (TX + TW - 16, TY + 50), 1)
 
@@ -6096,12 +6109,12 @@ def username_screen(screen, clock, fonts):
                 screen.blit(pg_title, (TX + TW // 2 - pg_title.get_width() // 2, TY + 72))
 
                 controls = [
-                    ("Movement",     "WASD  /  Arrow Keys"),
-                    ("Shoot",        "Left Mouse Button  (aim with cursor)"),
-                    ("Dash",         "Space  —  2 charges, ~7s recharge each"),
-                    ("Open Shop",    "TAB"),
-                    ("Pause",        "P  or  ESC"),
-                    ("Heal (Shop)",  "H  in the shop  (250g, +10 HP)"),
+                    ("Movement",    "WASD  /  Arrow Keys"),
+                    ("Shoot",       "Hold Left Mouse Button  —  aim with cursor"),
+                    ("Dash",        "SPACE  —  2 charges, ~7s cooldown each"),
+                    ("Switch Weapon","Mouse Wheel  /  number keys in shop"),
+                    ("Open Shop",   "TAB  —  buy weapons & heal here"),
+                    ("Pause",       "P  or  ESC"),
                 ]
                 for ri, (label, value) in enumerate(controls):
                     ry = TY + 110 + ri * 46
@@ -6118,12 +6131,12 @@ def username_screen(screen, clock, fonts):
                 screen.blit(pg_title, (TX + TW // 2 - pg_title.get_width() // 2, TY + 72))
 
                 mechanics = [
-                    ("Waves",       "Survive endless waves of enemies. Every 10th wave is a Boss wave."),
-                    ("Gold & Shop", "Enemies drop gold — buy new weapons in the shop with TAB."),
-                    ("Tokens",      "Defeat bosses to earn Tokens — spend them on cosmetics."),
-                    ("Perks",       "Every 5 waves pick 1 of 3 perk cards to boost your stats."),
-                    ("Corruption",  "Some waves are Corruption waves — harder enemies, better loot."),
-                    ("Level Up",    "Kill enemies for XP. Higher level = more HP and damage."),
+                    ("Waves",        "Survive endless enemy waves. Every 10th wave is a Boss wave."),
+                    ("Gold & Shop",  "Enemies drop gold — open shop with TAB to buy weapons & heal."),
+                    ("HP Orbs",      "Enemies occasionally drop green HP orbs. Uncollected drops are auto-collected after 10s."),
+                    ("Perks",        "Every 5 waves pick 1 of 3 perk cards: Damage, Defense, Speed, Lifesteal, Range, and more."),
+                    ("Corruption",   "Special waves spawn elite enemies — harder, but worth more gold and XP."),
+                    ("Bosses",       "Defeat bosses to earn Tokens. Spend tokens on cosmetics in the shop."),
                 ]
                 for ri, (label, value) in enumerate(mechanics):
                     ry = TY + 110 + ri * 46
@@ -6147,8 +6160,15 @@ def username_screen(screen, clock, fonts):
                 screen.blit(pb_lbl, (prev_btn.centerx - pb_lbl.get_width() // 2,
                                      prev_btn.centery - pb_lbl.get_height() // 2))
 
-            btn_label = "Next ►" if tutorial_page == 0 else "Got it!  ►"
-            btn_col   = CYAN if tutorial_page == 0 else GREEN
+            if tutorial_page == 0:
+                btn_label = "Next ►"
+                btn_col   = CYAN
+            elif show_help:
+                btn_label = "Close  ✕"
+                btn_col   = (255, 180, 80)
+            else:
+                btn_label = "Play!  ►"
+                btn_col   = GREEN
             pygame.draw.rect(screen, lerp_color(PANEL, btn_col, 0.25),
                              next_btn, border_radius=8)
             pygame.draw.rect(screen, btn_col, next_btn, 2, border_radius=8)
@@ -6157,7 +6177,7 @@ def username_screen(screen, clock, fonts):
                                   next_btn.centery - nb_lbl.get_height() // 2))
 
             hint_t = fonts["tiny"].render(
-                "◄/► or A/D to navigate  |  ENTER on last page to start", True, GRAY)
+                "◄/► or A/D to navigate  |  ESC to close", True, GRAY)
             screen.blit(hint_t, (TX + TW // 2 - hint_t.get_width() // 2, TY + TH - 16))
 
         # ── Top strip — drawn absolutely last so nothing can paint over it ───────
@@ -6223,7 +6243,7 @@ class Game:
         self._window          = window
         self._apply_display   = apply_display_fn   # callable() → new window Surface
         self._overlay = pygame.Surface((SW, SH), pygame.SRCALPHA)  # reused every frame
-        pygame.display.set_caption("Dungeon Crawler 43.1b13")
+        pygame.display.set_caption("Dungeon Crawler 43.1b8")
         self.clock    = pygame.time.Clock()
         self.world_w  = 3000; self.world_h = 3000
         self.username = username
@@ -8672,7 +8692,7 @@ def apply_display_mode(current_window):
 
 if __name__ == "__main__":
     _window = apply_display_mode(None)
-    pygame.display.set_caption("Dungeon Crawler 43.1b13")
+    pygame.display.set_caption("Dungeon Crawler 43.1b8")
 
     # Window icon
     _icon_path = asset("icon.png")
