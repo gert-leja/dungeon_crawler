@@ -122,7 +122,6 @@ class Music:
             return
         path = self._find(key)
         if path is None:
-            # Not a hard error — just skip missing files
             if self._current is not None:
                 pygame.mixer.music.stop()
                 self._current = None
@@ -132,10 +131,19 @@ class Music:
             pygame.mixer.music.load(path)
             pygame.mixer.music.set_volume(self.volume)
             pygame.mixer.music.play(loops, fade_ms=fadein)
+            # Post a custom event when the track reaches its end so we can reset
+            # _resume_offset_s — without this, a looping track accumulates an ever-
+            # growing offset that makes position-based seek fail on the second loop.
+            pygame.mixer.music.set_endevent(pygame.USEREVENT + 1)
             self._current         = key
-            self._resume_offset_s = 0.0   # fresh start — reset accumulated offset
+            self._resume_offset_s = 0.0
         except pygame.error as e:
             print(f"[Music] Could not play '{path}': {e}")
+
+    def on_track_end(self):
+        """Call this when pygame.USEREVENT+1 fires (track looped / ended).
+        Resets the accumulated position so the next pause_resume seeks from 0."""
+        self._resume_offset_s = 0.0
 
     def play_boss(self, boss_name):
         """Look up the boss-specific track and play it."""
@@ -143,7 +151,7 @@ class Music:
         if key:
             self.play(key)
         else:
-            self.play("battle")   # fallback for unknown bosses
+            self.play("battle")
 
     def stop(self, fadeout=600):
         if not self.enabled: return
@@ -157,19 +165,16 @@ class Music:
         if not self.enabled:
             return
         self._paused_key = self._current
-        # get_pos() only measures time since the last play() / seek, not since
-        # the start of the file.  Add _resume_offset_s (the file position we
-        # seeked to on the last resume) to get the true file position.
         elapsed = max(0.0, pygame.mixer.music.get_pos() / 1000.0)
         self._paused_pos_s = self._resume_offset_s + elapsed
 
     def unpause_resume(self):
         """Reload the track saved by pause_resume() and seek to the saved position.
-        No-op if pause_resume() was never called or no track was playing."""
+        Falls back to playing from the start if seeking is not supported."""
         if not self.enabled:
             return
-        key     = getattr(self, "_paused_key",  None)
-        pos_s   = getattr(self, "_paused_pos_s", 0.0)
+        key   = getattr(self, "_paused_key",  None)
+        pos_s = getattr(self, "_paused_pos_s", 0.0)
         self._paused_key   = None
         self._paused_pos_s = 0.0
         if not key:
@@ -180,11 +185,16 @@ class Music:
         try:
             pygame.mixer.music.load(path)
             pygame.mixer.music.set_volume(self.volume)
-            # play(loops, start=seconds) seeks to the saved position instantly,
-            # no fade-in so the resumption feels immediate
-            pygame.mixer.music.play(-1, start=pos_s)
-            self._current         = key
-            self._resume_offset_s = pos_s   # remember where we seeked to
+            try:
+                pygame.mixer.music.play(-1, start=pos_s)
+                self._current         = key
+                self._resume_offset_s = pos_s
+            except pygame.error:
+                # Seeking not supported for this codec (e.g. OGG on some backends
+                # after a loop) — fall back to playing from the start
+                pygame.mixer.music.play(-1)
+                self._current         = key
+                self._resume_offset_s = 0.0
         except pygame.error as e:
             print(f"[Music] Could not resume '{path}': {e}")
 
@@ -330,18 +340,20 @@ class MenuVideo:
 
 # ── Leaderboard ───────────────────────────────────────────────────────────────
 
-LEADERBOARD_FILE = os.path.join(DATA_DIR, "leaderboard.json")
+LEADERBOARD_FILE    = os.path.join(DATA_DIR, "leaderboard.json")
+LEADERBOARD_HC_FILE = os.path.join(DATA_DIR, "leaderboard_hardcore.json")
 LEADERBOARD_MAX  = 10
 
 class Leaderboard:
-    def __init__(self):
-        self.entries = self._load()
+    def __init__(self, hardcore=False):
+        self.hardcore = hardcore
+        self._file    = LEADERBOARD_HC_FILE if hardcore else LEADERBOARD_FILE
+        self.entries  = self._load()
 
     def _load(self):
         try:
-            with open(LEADERBOARD_FILE, "r", encoding="utf-8") as f:
+            with open(self._file, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            # Validate shape
             entries = []
             for e in data:
                 if all(k in e for k in ("name", "wave", "level", "kills", "bosses")):
@@ -352,7 +364,7 @@ class Leaderboard:
 
     def _save(self):
         try:
-            with open(LEADERBOARD_FILE, "w", encoding="utf-8") as f:
+            with open(self._file, "w", encoding="utf-8") as f:
                 json.dump(self.entries, f, indent=2)
         except Exception as e:
             print(f"[Leaderboard] Could not save: {e}")
@@ -362,24 +374,37 @@ class Leaderboard:
         entry = {"name": name, "wave": wave, "level": level,
                  "kills": kills, "bosses": bosses}
         self.entries.append(entry)
-        # Sort: primary wave desc, secondary level desc, tertiary kills desc
         self.entries.sort(key=lambda e: (e["wave"], e["level"], e["kills"]), reverse=True)
         self.entries = self.entries[:LEADERBOARD_MAX]
         self._save()
         try:
             return self.entries.index(entry) + 1
         except ValueError:
-            return None  # didn't make top 10
+            return None
 
-    def draw(self, surf, fonts, x, y, w, highlight_name=None):
+    def draw(self, surf, fonts, x, y, w, highlight_name=None, t=0):
         """Draw the leaderboard table at (x,y) with width w. Returns height used."""
-        title = fonts["large"].render("TOP 10 LEADERBOARD", True, YELLOW)
-        surf.blit(title, (x + w // 2 - title.get_width() // 2, y))
+        col = (255, 100, 40) if self.hardcore else YELLOW
+        if self.hardcore:
+            # Animated flaming skulls flanking the title text
+            title_text = fonts["large"].render("HARDCORE TOP 10", True, col)
+            skull_size = 14
+            skull_w    = skull_size * 2 + 4
+            gap        = 8
+            total_w    = skull_w + gap + title_text.get_width() + gap + skull_w
+            tx         = x + w // 2 - total_w // 2
+            ty         = y + title_text.get_height() // 2
+            draw_flaming_skull(surf, tx + skull_size, ty, t, size=skull_size)
+            surf.blit(title_text, (tx + skull_w + gap, y))
+            draw_flaming_skull(surf, tx + skull_w + gap + title_text.get_width() + gap + skull_size,
+                               ty, t + 15, size=skull_size)
+        else:
+            title = fonts["large"].render("TOP 10 LEADERBOARD", True, col)
+            surf.blit(title, (x + w // 2 - title.get_width() // 2, y))
         y += 38
 
-        # Header row
         pygame.draw.line(surf, (70, 70, 90), (x, y), (x + w, y), 1)
-        col_x = [x + 4, x + 32, x + 170, x + 270, x + 340, x + 410]
+        col_x   = [x + 4, x + 32, x + 170, x + 270, x + 340, x + 410]
         headers = ["#", "Name", "Wave", "Level", "Kills", "Bosses"]
         for cx, hdr in zip(col_x, headers):
             hs = fonts["tiny"].render(hdr, True, GRAY)
@@ -395,7 +420,6 @@ class Leaderboard:
 
         for i, e in enumerate(self.entries):
             row_y = y + i * 26
-            # Highlight the player's own entry
             is_highlight = (highlight_name and e["name"] == highlight_name)
             if is_highlight:
                 hl = pygame.Surface((w, 24), pygame.SRCALPHA)
@@ -415,7 +439,6 @@ class Leaderboard:
             for cx, surf_s in zip(col_x, [rank_s, name_s, wave_s, level_s, kills_s, boss_s]):
                 surf.blit(surf_s, (cx, row_y + 2))
 
-            # Subtle row separator
             if i < len(self.entries) - 1:
                 pygame.draw.line(surf, (40, 40, 56),
                                  (x, row_y + 25), (x + w, row_y + 25), 1)
@@ -524,6 +547,12 @@ TOKENS = TokenWallet()
 
 SETTINGS_FILE  = os.path.join(DATA_DIR, "settings.json")
 FIRST_RUN_FILE = os.path.join(DATA_DIR, "first_run.json")
+CHECKPOINT_FILE = os.path.join(DATA_DIR, "checkpoint.json")   # legacy, unused now
+NUM_SAVE_SLOTS  = 5
+
+def _slot_path(slot):
+    """Return the file path for save slot 1-5."""
+    return os.path.join(DATA_DIR, f"save_slot_{slot}.json")
 
 class GameSettings:
     """Persists quality, volume, display settings across launches."""
@@ -583,7 +612,7 @@ DARK   = (18, 18, 28)
 PANEL  = (28, 28, 42)
 
 WAVE_BREAK_SECS = 10
-GAME_VERSION    = "43.2b1"
+GAME_VERSION    = "44.0b12"
 
 # ── Online version check ──────────────────────────────────────────────────────
 _GH_API_URL  = ""#"https://api.github.com/repos/gert-leja/dungeon_crawler/releases"
@@ -672,24 +701,24 @@ threading.Thread(target=_fetch_latest_release, daemon=True).start()
 # Categories: "added", "changed", "fixed", "removed"
 PATCH_NOTES = [
     {
+        "version": "44.0",
+        "date":    "26-03-2026",
+        "changes": [
+            ("added",   "New Hardcore mode, this will delete your save upon death and no HP drops will spawn from enemies."),
+            ("added",   "Difficulty options now selectable after picking username."),
+            ("added",   "Two different leaderboards, one for normal mode and one for hardcore mode."),
+            ("added",   "Checkpoint functionality, the game saves after every wave, and just before a new wave starts, and is loadable from 'Load Game' in the main menu."),            
+            ("changed",   "Main Menu has been reworked, buttons are now in a more organised location."),
+            ("fixed",   "Settings menu during a paused game not working."),
+            ("fixed",   "Hardcore mode visuals not appearing as intended."),
+        ],
+    },
+    {
         "version": "43.2",
         "date":    "26-03-2026",
         "changes": [
             ("added",   "'Help' button in the main menu that displays the tutorial."),
             ("changed", "Updated tutorial information."),
-        ],
-    },
-    {
-        "version": "43.1",
-        "date":    "25-03-2026",
-        "changes": [
-            ("removed",   "Resolution options removed."),
-            ("fixed",   "Fullscreen crashing the game when selected."),
-            ("fixed",   "Void Orbiter crashing the game when mouse is released."),
-            ("changed",   "Main menu and battle songs have been changed."),
-            ("changed",   "Red Orb enemy's speed has slightly increased from 0.85 to 1.05."),
-            ("changed",   "Regen perk has been changed to 'Lifesteal'."),
-            ("changed",   "Void Orbiter's fire interval is doubled."),
         ],
     },
 ]
@@ -1067,6 +1096,125 @@ def draw_bar(surf, x, y, w, h, val, maxval, col, bg=(40, 40, 55)):
         if fill > 0:
             pygame.draw.rect(surf, col, (x, y, fill, h), border_radius=4)
     pygame.draw.rect(surf, (80, 80, 100), (x, y, w, h), 1, border_radius=4)
+
+
+def draw_skull(surf, cx, cy, size=10, col=(200, 195, 180)):
+    """Draw a simple static skull (no flames) centred at (cx, cy)."""
+    s = size
+    shad = tuple(max(0, c - 60) for c in col)
+    # Cranium
+    pygame.draw.ellipse(surf, shad, (cx - s + 1, cy - int(s * 0.9) + 1, s * 2, int(s * 1.5)))
+    pygame.draw.ellipse(surf, col,  (cx - s,     cy - int(s * 0.9),     s * 2, int(s * 1.5)))
+    # Jaw
+    jw = int(s * 1.2); jh = int(s * 0.55)
+    pygame.draw.rect(surf, col, (cx - jw // 2, cy + int(s * 0.3), jw, jh), border_radius=int(s * 0.2))
+    # Eye sockets
+    for ex in (cx - int(s * 0.38), cx + int(s * 0.38)):
+        pygame.draw.ellipse(surf, (25, 20, 15),
+                            (ex - int(s * 0.34), cy - int(s * 0.18),
+                             int(s * 0.68), int(s * 0.55)))
+    # Nose
+    pygame.draw.rect(surf, (50, 40, 35),
+                     (cx - max(2, int(s * 0.15)), cy + int(s * 0.1),
+                      max(3, int(s * 0.30)), max(3, int(s * 0.28))), border_radius=1)
+    # Teeth
+    tw = max(2, int(s * 0.22)); th = max(2, int(s * 0.25))
+    tg = int(s * 0.05)
+    ty2 = cy + int(s * 0.35)
+    tot = tw * 3 + tg * 2
+    for ti in range(3):
+        tx2 = cx - tot // 2 + ti * (tw + tg)
+        pygame.draw.rect(surf, (180, 175, 160), (tx2, ty2, tw, th), border_radius=1)
+
+
+def draw_flaming_skull(surf, cx, cy, t, size=10):
+    """
+    Draw a procedural animated flaming skull centred at (cx, cy).
+    t = frame counter (integer).  size controls overall scale.
+    Returns the pixel width of the drawn skull (for layout).
+    """
+    s = size  # shorthand
+
+    # ── Flames (drawn behind skull) ──────────────────────────────────────────
+    flame_cols = [
+        (255, 60,  0,  180),
+        (255, 140, 0,  160),
+        (255, 210, 40, 130),
+    ]
+    # Three flame tongues — left, centre, right
+    for fi, (fx_off, fw_scale, fh_scale, phase) in enumerate([
+        (-int(s * 0.4), 0.5, 0.9, 0.0),
+        (0,             0.7, 1.2, 0.4),
+        (int(s * 0.4),  0.5, 0.9, 0.8),
+    ]):
+        flicker = math.sin(t * 0.18 + phase * math.pi * 2) * 0.18 + 0.82  # 0.64–1.0
+        fh = int(s * fh_scale * flicker)
+        fw = max(3, int(s * fw_scale))
+        fx = cx + fx_off - fw // 2
+        fy = cy - int(s * 0.6) - fh  # sit above skull top
+
+        # Draw each tongue as three layers (outer dim → inner bright)
+        for li, (r, g, b, a) in enumerate(flame_cols):
+            layer_shrink = li * 2
+            lfw = max(2, fw - layer_shrink * 2)
+            lfh = max(2, fh - layer_shrink)
+            lfs = pygame.Surface((lfw + 2, lfh + 2), pygame.SRCALPHA)
+            # Teardrop-ish shape: ellipse squished to a point at top
+            pygame.draw.ellipse(lfs, (r, g, b, a), (0, lfh // 3, lfw, lfh * 2 // 3))
+            pygame.draw.ellipse(lfs, (r, g, b, max(0, a - 40)),
+                                (lfw // 4, 0, lfw // 2, lfh * 2 // 3))
+            surf.blit(lfs, (fx + layer_shrink, fy + layer_shrink))
+
+    # ── Skull cranium ─────────────────────────────────────────────────────────
+    skull_col  = (220, 215, 200)
+    shadow_col = (140, 135, 120)
+    pygame.draw.ellipse(surf, shadow_col,
+                        (cx - s + 2, cy - int(s * 0.9) + 2, s * 2, int(s * 1.5)))
+    pygame.draw.ellipse(surf, skull_col,
+                        (cx - s, cy - int(s * 0.9), s * 2, int(s * 1.5)))
+
+    # ── Jaw ──────────────────────────────────────────────────────────────────
+    jaw_w = int(s * 1.2)
+    jaw_h = int(s * 0.55)
+    pygame.draw.rect(surf, skull_col,
+                     (cx - jaw_w // 2, cy + int(s * 0.3), jaw_w, jaw_h),
+                     border_radius=int(s * 0.2))
+
+    # ── Eye sockets (dark hollows) ────────────────────────────────────────────
+    eye_y    = cy - int(s * 0.15)
+    eye_rx   = int(s * 0.38)
+    eye_r    = int(s * 0.32)
+    eye_col  = (20, 15, 10)
+    # Pulsing glow inside eyes — flickers orange
+    glow_a = int(120 + math.sin(t * 0.20) * 80)
+    glow_a = max(0, min(255, glow_a))
+    for ex in (cx - int(s * 0.38), cx + int(s * 0.38)):
+        gs = pygame.Surface((eye_r * 2 + 4, eye_r * 2 + 4), pygame.SRCALPHA)
+        pygame.draw.ellipse(gs, (255, 120, 0, glow_a), (0, 0, eye_r * 2 + 4, eye_r * 2 + 4))
+        surf.blit(gs, (ex - eye_r - 2, eye_y - eye_r - 2))
+        pygame.draw.ellipse(surf, eye_col,
+                            (ex - eye_rx, eye_y - eye_r, eye_rx * 2, eye_r * 2))
+
+    # ── Nasal cavity ─────────────────────────────────────────────────────────
+    nose_w = max(3, int(s * 0.25))
+    nose_h = max(3, int(s * 0.28))
+    pygame.draw.rect(surf, (60, 50, 40),
+                     (cx - nose_w // 2, cy + int(s * 0.1), nose_w, nose_h),
+                     border_radius=2)
+
+    # ── Teeth ────────────────────────────────────────────────────────────────
+    tooth_w = max(2, int(s * 0.22))
+    tooth_h = max(3, int(s * 0.28))
+    tooth_gap = int(s * 0.05)
+    tooth_y = cy + int(s * 0.35)
+    teeth_total = tooth_w * 3 + tooth_gap * 2
+    for ti in range(3):
+        tx = cx - teeth_total // 2 + ti * (tooth_w + tooth_gap)
+        pygame.draw.rect(surf, (200, 195, 180),
+                         (tx, tooth_y, tooth_w, tooth_h), border_radius=2)
+
+    # Return approximate pixel width for layout
+    return s * 2 + 4
 
 # ── Gold coin (physical pickup) ───────────────────────────────────────────────
 
@@ -5297,21 +5445,95 @@ def is_first_run():
     return False
 
 
+def save_checkpoint(game, slot):
+    """Save the player's full state to a numbered save slot (1-5)."""
+    p = game.player
+    data = {
+        "slot":                       slot,
+        "username":                   p.username,
+        "wave":                       game.wave,
+        "boss_killed":                game.boss_killed,
+        "level":                      p.level,
+        "xp":                         p.xp,
+        "xp_to_next":                 p.xp_to_next,
+        "max_hp":                     p.max_hp,
+        "hp":                         p.hp,
+        "gold":                       p.gold,
+        "weapon_idx":                 p.weapon_idx,
+        "owned_weapons":              p.owned_weapons,
+        "perks":                      p.perks,
+        "kill_count":                 p.kill_count,
+        "corruption_waves_cleared":   p.corruption_waves_cleared,
+        "hardcore": game.hardcore,
+        # World drops — saved so nothing is lost on reload
+        "gold_coins": [
+            {"x": gc.x, "y": gc.y, "amount": gc.amount}
+            for gc in game.gold_coins if gc.alive
+        ],
+        "hp_orbs": [
+            {"x": orb.x, "y": orb.y, "amount": orb.amount}
+            for orb in game.hp_orbs if orb.alive
+        ],
+    }
+    try:
+        with open(_slot_path(slot), "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+        print(f"[Checkpoint] Slot {slot} saved — wave {game.wave}")
+    except Exception as e:
+        print(f"[Checkpoint] Could not save slot {slot}: {e}")
+
+
+def load_checkpoint(slot):
+    """Return checkpoint dict for slot (1-5), or None if missing/corrupt."""
+    try:
+        with open(_slot_path(slot), "r", encoding="utf-8") as f:
+            data = json.load(f)
+        required = ("username", "wave", "level", "hp", "max_hp", "perks")
+        if all(k in data for k in required):
+            return data
+    except (FileNotFoundError, json.JSONDecodeError):
+        pass
+    return None
+
+
+def load_all_slots():
+    """Return a list of 5 entries: checkpoint dict or None for each slot 1-5."""
+    return [load_checkpoint(s) for s in range(1, NUM_SAVE_SLOTS + 1)]
+
+
+def delete_checkpoint(slot):
+    """Delete the save file for a slot."""
+    try:
+        path = _slot_path(slot)
+        if os.path.isfile(path):
+            os.remove(path)
+    except Exception as e:
+        print(f"[Checkpoint] Could not delete slot {slot}: {e}")
+
+
 def username_screen(screen, clock, fonts):
-    """Title / setup screen. Returns username_str."""
+    """Main menu screen. Returns (username_str, checkpoint_or_None, save_slot, hardcore_bool)."""
+    # mode: "main" | "new_game" | "difficulty" | "slot_new" | "slot_load"
+    mode          = "main"
     username      = ""
+    selected_slot = None
+    difficulty    = "normal"   # "normal" or "hardcore"
     cursor_blink  = 0
-    show_lb       = False
     show_settings = False
-    show_patchnotes = False
     show_credits  = False
-    show_tutorial = False   # shown once on first ever play, or via Help button
-    show_help     = False   # True when Help button clicked (distinct from first-run auto-show)
-    tutorial_page = 0       # 0 = controls, 1 = mechanics
+    show_tutorial = False
+    show_help     = False
+    tutorial_page = 0
     credits_page  = 0
     slider_drag   = False
-    lb            = Leaderboard()
-    # Tip — pick one randomly each time the player enters the main menu
+    show_extras       = False
+    show_quit_confirm = False
+    show_lb       = False
+    lb_page       = 0   # 0 = normal, 1 = hardcore
+    show_patchnotes = False
+    lb            = Leaderboard(hardcore=False)
+    lb_hc         = Leaderboard(hardcore=True)
+    slots         = load_all_slots()   # list of 5: checkpoint dict or None
     tip_idx = random.randrange(len(MENU_TIPS))
 
     MUSIC.play("menu")
@@ -5379,12 +5601,16 @@ def username_screen(screen, clock, fonts):
     # Pre-define button rects so they exist before the first draw pass
     lb_rect       = pygame.Rect(0, 0, 1, 1)
     pn_rect       = pygame.Rect(0, 0, 1, 1)
-    settings_rect = pygame.Rect(0, 0, 1, 1)
-    credits_rect  = pygame.Rect(0, 0, 1, 1)
     help_rect     = pygame.Rect(0, 0, 1, 1)
-    update_rect   = pygame.Rect(0, 0, 1, 1)   # clickable download button in update strip
-    close_rect    = pygame.Rect(SW - 48, 8, 36, 36)
+    # Main menu buttons
+    btn_new_game  = pygame.Rect(0, 0, 1, 1)
+    btn_load_game = pygame.Rect(0, 0, 1, 1)
+    btn_settings  = pygame.Rect(0, 0, 1, 1)
+    btn_credits   = pygame.Rect(0, 0, 1, 1)
+    btn_extras    = pygame.Rect(0, 0, 1, 1)
     play_rect     = None
+    update_rect   = pygame.Rect(0, 0, 1, 1)
+    close_rect    = pygame.Rect(SW - 48, 8, 36, 36)
 
     while True:
         clock.tick(FPS)
@@ -5394,8 +5620,8 @@ def username_screen(screen, clock, fonts):
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 pygame.quit(); sys.exit()
-
-            # ── Settings overlay consumes all input while open ─────────────
+            if event.type == pygame.USEREVENT + 1:
+                MUSIC.on_track_end()
             if show_settings:
                 if event.type == pygame.KEYDOWN:
                     if event.key in (pygame.K_ESCAPE, pygame.K_RETURN):
@@ -5455,9 +5681,24 @@ def username_screen(screen, clock, fonts):
             # ── Leaderboard overlay ────────────────────────────────────────
             if show_lb:
                 if event.type == pygame.KEYDOWN:
-                    show_lb = False
+                    if event.key in (pygame.K_LEFT, pygame.K_a):
+                        lb_page = 0
+                    elif event.key in (pygame.K_RIGHT, pygame.K_d):
+                        lb_page = 1
+                    else:
+                        show_lb = False
                 if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
-                    show_lb = False
+                    px_lb, py_lb = event.pos
+                    lw2, lh2 = 700, 500
+                    lx2 = SW // 2 - lw2 // 2; ly2 = SH // 2 - lh2 // 2
+                    btn_prev = pygame.Rect(lx2 + 16,          ly2 + lh2 - 48, 140, 34)
+                    btn_next = pygame.Rect(lx2 + lw2 - 156,   ly2 + lh2 - 48, 140, 34)
+                    if btn_prev.collidepoint(px_lb, py_lb):
+                        lb_page = 0
+                    elif btn_next.collidepoint(px_lb, py_lb):
+                        lb_page = 1
+                    elif not (lx2 <= px_lb <= lx2 + lw2 and ly2 <= py_lb <= ly2 + lh2):
+                        show_lb = False
                 continue
 
             # ── Patch notes overlay ────────────────────────────────────────
@@ -5482,7 +5723,7 @@ def username_screen(screen, clock, fonts):
                                 show_help     = False
                             else:
                                 if menu_video[0]: menu_video[0].release()
-                                return username.strip()
+                                return username.strip(), None, selected_slot, (difficulty == "hardcore")
                         elif event.key == pygame.K_ESCAPE:
                             show_tutorial = False
                             show_help     = False
@@ -5502,7 +5743,7 @@ def username_screen(screen, clock, fonts):
                             show_help     = False
                         else:
                             if menu_video[0]: menu_video[0].release()
-                            return username.strip()
+                            return username.strip(), None, selected_slot, (difficulty == "hardcore")
                 continue
 
             # ── Credits overlay ────────────────────────────────────────────
@@ -5520,19 +5761,51 @@ def username_screen(screen, clock, fonts):
                     credits_page = 0
                 continue
 
+            # ── Quit confirm dialog ────────────────────────────────────────
+            if show_quit_confirm:
+                if event.type == pygame.KEYDOWN:
+                    if event.key == pygame.K_ESCAPE:
+                        show_quit_confirm = False
+                    elif event.key in (pygame.K_RETURN, pygame.K_y):
+                        if menu_video[0]: menu_video[0].release()
+                        pygame.quit(); sys.exit()
+                    elif event.key == pygame.K_n:
+                        show_quit_confirm = False
+                if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                    px_q, py_q = event.pos
+                    QW, QH = 320, 140
+                    QX = SW // 2 - QW // 2; QY = SH // 2 - QH // 2
+                    btn_yes = pygame.Rect(QX + 24,          QY + 76, 120, 40)
+                    btn_no  = pygame.Rect(QX + QW - 144,    QY + 76, 120, 40)
+                    if btn_yes.collidepoint(px_q, py_q):
+                        if menu_video[0]: menu_video[0].release()
+                        pygame.quit(); sys.exit()
+                    elif btn_no.collidepoint(px_q, py_q) or \
+                         not (QX <= px_q <= QX + QW and QY <= py_q <= QY + QH):
+                        show_quit_confirm = False
+                continue
+
             # ── Normal events ──────────────────────────────────────────────
             if event.type == pygame.KEYDOWN:
-                if event.key == pygame.K_RETURN and username.strip():
-                    if is_first_run():
-                        show_tutorial = True
-                        tutorial_page = 0
-                    else:
-                        if menu_video[0]: menu_video[0].release()
-                        return username.strip()
-                elif event.key == pygame.K_BACKSPACE:
-                    username = username[:-1]
-                elif len(username) < 16 and event.unicode.isprintable():
-                    username += event.unicode
+                if mode == "new_game":
+                    if event.key == pygame.K_ESCAPE:
+                        mode = "main"
+                    elif event.key == pygame.K_BACKSPACE:
+                        username = username[:-1]
+                    elif event.key == pygame.K_RETURN and username.strip():
+                        mode = "difficulty"
+                    elif len(username) < 16 and event.unicode.isprintable():
+                        username += event.unicode
+                elif mode == "difficulty":
+                    if event.key == pygame.K_ESCAPE:
+                        mode = "new_game"
+                elif mode in ("slot_new", "slot_load"):
+                    if event.key == pygame.K_ESCAPE:
+                        mode = "difficulty" if mode == "slot_new" else "main"
+                        selected_slot = None
+                elif mode == "main":
+                    if event.key == pygame.K_ESCAPE:
+                        show_quit_confirm = True
             if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                 px, py = event.pos
                 if close_rect.collidepoint(px, py):
@@ -5540,26 +5813,85 @@ def username_screen(screen, clock, fonts):
                     pygame.quit(); sys.exit()
                 if update_rect.collidepoint(px, py) and _update_info.get("url"):
                     webbrowser.open(_update_info["url"])
-                elif lb_rect.collidepoint(px, py):
-                    show_lb = True
-                elif pn_rect.collidepoint(px, py):
-                    show_patchnotes = True
-                elif credits_rect.collidepoint(px, py):
-                    show_credits = True
-                    credits_page = 0
-                elif help_rect.collidepoint(px, py):
-                    show_tutorial = True
-                    show_help     = True
-                    tutorial_page = 0
-                elif settings_rect.collidepoint(px, py):
-                    show_settings = True
-                elif play_rect and play_rect.collidepoint(px, py) and username.strip():
-                    if is_first_run():
-                        show_tutorial = True
-                        tutorial_page = 0
+                # ── Main menu buttons — only active when no sub-panel is open ─
+                elif mode == "main":
+                    if btn_new_game.collidepoint(px, py):
+                        mode = "new_game"
+                        username = ""
+                        show_extras = False
+                    elif btn_load_game.collidepoint(px, py):
+                        mode = "slot_load"
+                        slots = load_all_slots()
+                        show_extras = False
+                    elif btn_settings.collidepoint(px, py):
+                        show_settings = True
+                        show_extras = False
+                    elif btn_credits.collidepoint(px, py):
+                        show_credits  = True
+                        credits_page  = 0
+                        show_extras = False
+                    elif btn_extras.collidepoint(px, py):
+                        show_extras = not show_extras
+                    elif show_extras:
+                        if lb_rect.collidepoint(px, py):
+                            show_lb = True; show_extras = False
+                        elif pn_rect.collidepoint(px, py):
+                            show_patchnotes = True; show_extras = False
+                        elif help_rect.collidepoint(px, py):
+                            show_tutorial = True; show_help = True
+                            tutorial_page = 0; show_extras = False
+                        else:
+                            show_extras = False
+                # ── New game: username entry play button ───────────────────
+                elif mode == "new_game":
+                    if play_rect and play_rect.collidepoint(px, py) and username.strip():
+                        mode = "difficulty"
+                    elif not (play_rect and play_rect.collidepoint(px, py)):
+                        NW, NH = 360, 150
+                        NX = SW // 2 - NW // 2
+                        NY = btn_new_game.bottom + 10
+                        if not (NX <= px <= NX + NW and NY <= py <= NY + NH):
+                            mode = "main"
+                # ── Difficulty picker ──────────────────────────────────────
+                elif mode == "difficulty":
+                    if diff_normal_rect.collidepoint(px, py):
+                        difficulty = "normal"
+                        mode = "slot_new"
+                    elif diff_hard_rect.collidepoint(px, py):
+                        difficulty = "hardcore"
+                        mode = "slot_new"
                     else:
-                        if menu_video[0]: menu_video[0].release()
-                        return username.strip()
+                        # Click outside → back to username
+                        if not (DX <= px <= DX + DW and DY <= py <= DY + DH):
+                            mode = "new_game"
+                # ── Slot selection ─────────────────────────────────────────
+                elif mode == "slot_new":
+                    for si, sr in enumerate(slot_rects):
+                        if sr.collidepoint(px, py):
+                            slot_num = si + 1
+                            if is_first_run():
+                                show_tutorial = True
+                                show_help     = False
+                                tutorial_page = 0
+                                selected_slot = slot_num
+                            else:
+                                if menu_video[0]: menu_video[0].release()
+                                return username.strip(), None, slot_num, (difficulty == "hardcore")
+                elif mode == "slot_load":
+                    for si, sr in enumerate(slot_rects):
+                        if sr.collidepoint(px, py):
+                            slot_num = si + 1
+                            cp = slots[si]
+                            if cp:
+                                if menu_video[0]: menu_video[0].release()
+                                hc = cp.get("hardcore", False)
+                                return cp["username"], cp, slot_num, hc
+                    SW2 = 480
+                    SX2 = SW // 2 - SW2 // 2
+                    SY2 = btn_load_game.bottom + 10
+                    SH2 = NUM_SAVE_SLOTS * 64 + 56
+                    if not (SX2 <= px <= SX2 + SW2 and SY2 <= py <= SY2 + SH2):
+                        mode = "main"
 
         # ── Draw ─────────────────────────────────────────────────────────────
         # Background
@@ -5733,73 +6065,226 @@ def username_screen(screen, clock, fonts):
             flame_particles = next_fp
 
         # Draw title on top of the flame
-        # Subtle glow pass (slightly larger, dim purple)
         glow_s = fonts["huge"].render(TITLE_TEXT, True, (100, 20, 140))
         screen.blit(glow_s, (title_x - 1, title_y + 1))
         screen.blit(title, (title_x, title_y))
 
-        title_y_end = title_bot + 10
-        sub = fonts["med"].render("Enter your username to begin", True, GRAY)
-        screen.blit(sub, (SW // 2 - sub.get_width() // 2, title_y_end))
+        # ── Main menu buttons — single vertical column ────────────────────────
+        MBW  = 260   # button width
+        MBH  = 52    # button height
+        MGAP = 12    # gap between buttons
+        MX   = SW // 2 - MBW // 2
+        MY   = title_bot + 28
 
-        # Username input box
-        box_w, box_h = 400, 52
-        box_x = SW // 2 - box_w // 2
-        box_y = SH // 2 - box_h // 2 - 40
-        pygame.draw.rect(screen, PANEL, (box_x, box_y, box_w, box_h), border_radius=10)
-        pygame.draw.rect(screen, CYAN,  (box_x, box_y, box_w, box_h), 2, border_radius=10)
-        display_text = username + ("|" if cursor_blink % 60 < 30 else "")
-        screen.blit(fonts["large"].render(display_text, True, WHITE), (box_x + 14, box_y + 12))
+        has_saves   = any(s is not None for s in slots)
+        load_col    = (80, 220, 140) if has_saves else (70, 80, 70)
 
-        # Four top buttons
-        btn_y    = box_y + box_h + 16
-        btn_h    = 36
-        btn_w    = 130
-        gap      = 8
-        total_w  = btn_w * 4 + gap * 3
-        lb_rect       = pygame.Rect(SW // 2 - total_w // 2,               btn_y, btn_w, btn_h)
-        pn_rect       = pygame.Rect(SW // 2 - total_w // 2 + (btn_w + gap),     btn_y, btn_w, btn_h)
-        settings_rect = pygame.Rect(SW // 2 - total_w // 2 + (btn_w + gap) * 2, btn_y, btn_w, btn_h)
-        help_rect     = pygame.Rect(SW // 2 - total_w // 2 + (btn_w + gap) * 3, btn_y, btn_w, btn_h)
-        credits_rect  = pygame.Rect(SW // 2 - btn_w // 2, btn_y + btn_h + 8, btn_w, btn_h)
+        rows = [
+            ("btn_new_game",  "New Game",   GREEN,            True),
+            ("btn_load_game", "Load Game",  load_col,         True),
+            ("btn_settings",  "Settings",   (140, 180, 255),  True),
+            ("btn_credits",   "Credits",    (200, 160, 255),  True),
+            ("btn_extras",    "Extras  ▾",  (255, 200, 80),   True),
+        ]
 
-        for rect, label, col in [
-            (lb_rect,       "Leaderboard",  YELLOW),
-            (pn_rect,       "Patch Notes",  (100, 220, 160)),
-            (settings_rect, "Settings",     (140, 180, 255)),
-            (help_rect,     "Help",         (255, 180, 80)),
-        ]:
-            pygame.draw.rect(screen, lerp_color(PANEL, col, 0.15), rect, border_radius=8)
-            pygame.draw.rect(screen, col, rect, 1, border_radius=8)
-            lbl = fonts["small"].render(label, True, col)
+        btn_new_game  = pygame.Rect(MX, MY,                       MBW, MBH)
+        btn_load_game = pygame.Rect(MX, MY + (MBH + MGAP),        MBW, MBH)
+        btn_settings  = pygame.Rect(MX, MY + (MBH + MGAP) * 2,   MBW, MBH)
+        btn_credits   = pygame.Rect(MX, MY + (MBH + MGAP) * 3,   MBW, MBH)
+        btn_extras    = pygame.Rect(MX, MY + (MBH + MGAP) * 4,   MBW, MBH)
+
+        for rect, (_, label, col, active) in zip(
+                [btn_new_game, btn_load_game, btn_settings, btn_credits, btn_extras], rows):
+            bg = lerp_color(PANEL, col, 0.25 if active else 0.08)
+            pygame.draw.rect(screen, bg, rect, border_radius=10)
+            pygame.draw.rect(screen, col if active else GRAY, rect, 2, border_radius=10)
+            lbl = fonts["large"].render(label, True, col if active else GRAY)
             screen.blit(lbl, (rect.centerx - lbl.get_width() // 2,
                                rect.centery - lbl.get_height() // 2))
 
-        cr_col = (200, 160, 255)
-        pygame.draw.rect(screen, lerp_color(PANEL, cr_col, 0.15), credits_rect, border_radius=8)
-        pygame.draw.rect(screen, cr_col, credits_rect, 1, border_radius=8)
-        cr_lbl = fonts["small"].render("Credits", True, cr_col)
-        screen.blit(cr_lbl, (credits_rect.centerx - cr_lbl.get_width() // 2,
-                              credits_rect.centery - cr_lbl.get_height() // 2))
+        # ── New game sub-panel (username entry) ───────────────────────────────
+        play_rect  = None
+        slot_rects = [pygame.Rect(0, 0, 1, 1)] * NUM_SAVE_SLOTS
+        diff_normal_rect = pygame.Rect(0, 0, 1, 1)
+        diff_hard_rect   = pygame.Rect(0, 0, 1, 1)
+        DX = DY = DW = DH = 0   # difficulty panel bounds for outside-click detection
 
-        # Play button
-        play_top = credits_rect.bottom + 12
-        if username.strip():
-            play_rect = pygame.Rect(SW // 2 - 120, play_top, 240, 52)
-            pygame.draw.rect(screen, lerp_color(PANEL, GREEN, 0.3), play_rect, border_radius=10)
-            pygame.draw.rect(screen, GREEN, play_rect, 2, border_radius=10)
-            play_lbl = fonts["large"].render("PLAY", True, GREEN)
-            screen.blit(play_lbl, (play_rect.centerx - play_lbl.get_width() // 2,
-                                   play_rect.centery - play_lbl.get_height() // 2))
-            screen.blit(fonts["small"].render("or press ENTER", True, GRAY),
-                        (SW // 2 - fonts["small"].size("or press ENTER")[0] // 2,
-                         play_rect.bottom + 10))
-        else:
-            play_rect = None
-            screen.blit(fonts["small"].render("Type your name above to continue...", True, GRAY),
-                        (SW // 2 - 170, play_top + 8))
+        if mode == "new_game":
+            NW, NH = 360, 150
+            NX = SW // 2 - NW // 2
+            NY = btn_new_game.bottom + 10
+            np_s = pygame.Surface((NW, NH), pygame.SRCALPHA)
+            pygame.draw.rect(np_s, (18, 22, 38, 235), (0, 0, NW, NH), border_radius=12)
+            screen.blit(np_s, (NX, NY))
+            pygame.draw.rect(screen, GREEN, (NX, NY, NW, NH), 2, border_radius=12)
+            prompt = fonts["small"].render("Enter your username:", True, GRAY)
+            screen.blit(prompt, (NX + 16, NY + 14))
+            ibx = NX + 16; iby = NY + 38; ibw = NW - 32; ibh = 40
+            pygame.draw.rect(screen, PANEL, (ibx, iby, ibw, ibh), border_radius=8)
+            pygame.draw.rect(screen, CYAN,  (ibx, iby, ibw, ibh), 2, border_radius=8)
+            display_text = username + ("|" if cursor_blink % 60 < 30 else "")
+            screen.blit(fonts["large"].render(display_text, True, WHITE), (ibx + 10, iby + 6))
+            play_rect = pygame.Rect(NX + 16, NY + 96, NW - 32, 38)
+            if username.strip():
+                pygame.draw.rect(screen, lerp_color(PANEL, GREEN, 0.3), play_rect, border_radius=8)
+                pygame.draw.rect(screen, GREEN, play_rect, 2, border_radius=8)
+                pl = fonts["med"].render("Choose difficulty  ►", True, GREEN)
+            else:
+                pygame.draw.rect(screen, PANEL, play_rect, border_radius=8)
+                pygame.draw.rect(screen, GRAY,  play_rect, 1, border_radius=8)
+                pl = fonts["med"].render("Type a name first...", True, GRAY)
+            screen.blit(pl, (play_rect.centerx - pl.get_width() // 2,
+                              play_rect.centery - pl.get_height() // 2))
 
-        # Rotating tip — yellow, near bottom
+        # ── Difficulty picker ─────────────────────────────────────────────────
+        if mode == "difficulty":
+            DBW = 360; DBH = 56; DGAP = 12
+            DW  = DBW + 32
+            DH  = 40 + DBH * 2 + DGAP + 16
+            DX  = SW // 2 - DW // 2
+            DY  = btn_new_game.bottom + 10
+            dp_s = pygame.Surface((DW, DH), pygame.SRCALPHA)
+            pygame.draw.rect(dp_s, (18, 22, 38, 235), (0, 0, DW, DH), border_radius=12)
+            screen.blit(dp_s, (DX, DY))
+            pygame.draw.rect(screen, GREEN, (DX, DY, DW, DH), 2, border_radius=12)
+            dt = fonts["med"].render("Choose difficulty:", True, GRAY)
+            screen.blit(dt, (DX + DW // 2 - dt.get_width() // 2, DY + 10))
+
+            # Normal mode button
+            diff_normal_rect = pygame.Rect(DX + 16, DY + 40, DBW, DBH)
+            norm_hov = diff_normal_rect.collidepoint(mx_now, my_now)
+            norm_col = (80, 180, 255)
+            pygame.draw.rect(screen, lerp_color(PANEL, norm_col, 0.35 if norm_hov else 0.18),
+                             diff_normal_rect, border_radius=10)
+            pygame.draw.rect(screen, norm_col, diff_normal_rect, 2 if norm_hov else 1, border_radius=10)
+            nl = fonts["large"].render("Normal Mode", True, norm_col)
+            screen.blit(nl, (diff_normal_rect.centerx - nl.get_width() // 2,
+                              diff_normal_rect.centery - nl.get_height() // 2))
+
+            # Hardcore mode button
+            diff_hard_rect = pygame.Rect(DX + 16, DY + 40 + DBH + DGAP, DBW, DBH)
+            hard_hov = diff_hard_rect.collidepoint(mx_now, my_now)
+            hard_col = (255, 80, 40)
+            pygame.draw.rect(screen, lerp_color(PANEL, hard_col, 0.35 if hard_hov else 0.18),
+                             diff_hard_rect, border_radius=10)
+            pygame.draw.rect(screen, hard_col, diff_hard_rect, 2 if hard_hov else 1, border_radius=10)
+            # Flaming skull decorations on each side (procedural, animated)
+            hl = fonts["large"].render("Hardcore Mode", True, hard_col)
+            skull_size = 18
+            skull_w    = skull_size * 2 + 4
+            gap        = 10
+            total_w    = skull_w + gap + hl.get_width() + gap + skull_w
+            start_x    = diff_hard_rect.centerx - total_w // 2
+            cy_h       = diff_hard_rect.centery
+            draw_flaming_skull(screen, start_x + skull_size,
+                               cy_h, cursor_blink, size=skull_size)
+            screen.blit(hl, (start_x + skull_w + gap,
+                              cy_h - hl.get_height() // 2))
+            draw_flaming_skull(screen, start_x + skull_w + gap + hl.get_width() + gap + skull_size,
+                               cy_h, cursor_blink + 15, size=skull_size)
+
+            esc_h = fonts["tiny"].render("ESC to go back", True, GRAY)
+            screen.blit(esc_h, (DX + DW // 2 - esc_h.get_width() // 2, DY + DH - 18))
+
+        # ── Slot selection panel (new game or load game) ──────────────────────
+        if mode in ("slot_new", "slot_load"):
+            SW2 = 480; SH2 = NUM_SAVE_SLOTS * 64 + 56
+            SX2 = SW // 2 - SW2 // 2
+            if mode == "slot_new":
+                SY2 = btn_new_game.bottom + 10
+                panel_col = (255, 80, 40) if difficulty == "hardcore" else GREEN
+                diff_label = "  [HARDCORE]" if difficulty == "hardcore" else ""
+                title_str = f"Choose slot — \"{username.strip()}\"{diff_label}"
+            else:
+                SY2 = btn_load_game.bottom + 10
+                panel_col = (80, 220, 140)
+                title_str = "Select a save to load"
+
+            sp = pygame.Surface((SW2, SH2), pygame.SRCALPHA)
+            pygame.draw.rect(sp, (14, 18, 30, 240), (0, 0, SW2, SH2), border_radius=14)
+            screen.blit(sp, (SX2, SY2))
+            pygame.draw.rect(screen, panel_col, (SX2, SY2, SW2, SH2), 2, border_radius=14)
+            th = fonts["med"].render(title_str, True, panel_col)
+            screen.blit(th, (SX2 + SW2 // 2 - th.get_width() // 2, SY2 + 12))
+
+            slot_rects = []
+            for si in range(NUM_SAVE_SLOTS):
+                slot_num = si + 1
+                sr = pygame.Rect(SX2 + 16, SY2 + 44 + si * 64, SW2 - 32, 52)
+                slot_rects.append(sr)
+                cp = slots[si]
+
+                if mode == "slot_load" and cp is None:
+                    # Empty slot in load mode — unclickable
+                    pygame.draw.rect(screen, (25, 28, 40), sr, border_radius=8)
+                    pygame.draw.rect(screen, (50, 50, 65), sr, 1, border_radius=8)
+                    empty_lbl = fonts["small"].render(f"Slot {slot_num}  —  Empty", True, (60, 60, 75))
+                    screen.blit(empty_lbl, (sr.x + 14, sr.centery - empty_lbl.get_height() // 2))
+                else:
+                    hovered   = sr.collidepoint(mx_now, my_now)
+                    is_hc     = cp.get("hardcore", False) if cp else False
+                    if cp:
+                        if is_hc and mode == "slot_load":
+                            rim_col = (220, 60, 40)
+                            bg_col  = lerp_color(PANEL, (220, 60, 40), 0.30 if hovered else 0.18)
+                        else:
+                            rim_col = panel_col
+                            bg_col  = lerp_color(PANEL, panel_col, 0.30 if hovered else 0.15)
+                    else:
+                        bg_col  = lerp_color(PANEL, (80, 80, 100), 0.25 if hovered else 0.10)
+                        rim_col = (120, 120, 150)
+                    pygame.draw.rect(screen, bg_col, sr, border_radius=8)
+                    pygame.draw.rect(screen, rim_col, sr, 1 if not hovered else 2, border_radius=8)
+
+                    if cp:
+                        hc_tag  = "  [HARDCORE]" if is_hc else ""
+                        name_col = (255, 160, 120) if (is_hc and mode == "slot_load") else WHITE
+                        name_s  = fonts["med"].render(
+                            f"Slot {slot_num}  —  {cp['username']}{hc_tag}", True, name_col)
+                        info_s  = fonts["tiny"].render(
+                            f"Wave {cp['wave']}  •  Level {cp['level']}  •  "
+                            f"{cp.get('boss_killed', 0)} bosses killed", True, GRAY)
+                        screen.blit(name_s, (sr.x + 14, sr.y + 7))
+                        screen.blit(info_s, (sr.x + 14, sr.y + 30))
+                    else:
+                        empty_s = fonts["med"].render(f"Slot {slot_num}  —  Empty", True, (130, 140, 160))
+                        screen.blit(empty_s, (sr.x + 14, sr.centery - empty_s.get_height() // 2))
+
+            esc_hint = fonts["tiny"].render("ESC to go back", True, GRAY)
+            screen.blit(esc_hint, (SX2 + SW2 // 2 - esc_hint.get_width() // 2, SY2 + SH2 - 18))
+
+        # ── Extras sub-panel dropdown ─────────────────────────────────────────
+        EX_W = MBW; EX_BH = 40; EX_GAP = 6
+        EX_items = [
+            ("Leaderboard", YELLOW,          "lb"),
+            ("Patch Notes", (100, 220, 160), "pn"),
+            ("Help",        (255, 180, 80),  "help"),
+        ]
+        EX_H  = EX_BH * len(EX_items) + EX_GAP * (len(EX_items) - 1) + 16
+        EX_X  = btn_extras.x
+        EX_Y  = btn_extras.bottom + 6
+        ex_rects = []
+        for i in range(len(EX_items)):
+            ex_rects.append(pygame.Rect(EX_X, EX_Y + 8 + i * (EX_BH + EX_GAP), EX_W, EX_BH))
+        lb_rect   = ex_rects[0]
+        pn_rect   = ex_rects[1]
+        help_rect = ex_rects[2]
+
+        if show_extras:
+            ep = pygame.Surface((EX_W, EX_H), pygame.SRCALPHA)
+            pygame.draw.rect(ep, (20, 20, 36, 230), (0, 0, EX_W, EX_H), border_radius=10)
+            screen.blit(ep, (EX_X, EX_Y))
+            pygame.draw.rect(screen, (255, 200, 80), (EX_X, EX_Y, EX_W, EX_H), 1, border_radius=10)
+            for i, (elabel, ecol, _) in enumerate(EX_items):
+                er = ex_rects[i]
+                hov = er.collidepoint(mx_now, my_now)
+                pygame.draw.rect(screen, lerp_color(PANEL, ecol, 0.25 if hov else 0.12), er, border_radius=7)
+                pygame.draw.rect(screen, ecol, er, 1 if not hov else 2, border_radius=7)
+                el = fonts["small"].render(elabel, True, ecol)
+                screen.blit(el, (er.centerx - el.get_width() // 2,
+                                  er.centery - el.get_height() // 2))
+
+        # Rotating tip
         tip_s = fonts["small"].render(f"Tip: {MENU_TIPS[tip_idx]}", True, YELLOW)
         screen.blit(tip_s, (SW // 2 - tip_s.get_width() // 2, SH - 44))
 
@@ -5808,13 +6293,42 @@ def username_screen(screen, clock, fonts):
             ov = pygame.Surface((SW, SH), pygame.SRCALPHA)
             ov.fill((0, 0, 0, 200))
             screen.blit(ov, (0, 0))
-            lw2, lh2 = 700, 460
+            lw2, lh2 = 700, 500
             lx2 = SW // 2 - lw2 // 2; ly2 = SH // 2 - lh2 // 2
-            pygame.draw.rect(screen, PANEL,  (lx2, ly2, lw2, lh2), border_radius=14)
-            pygame.draw.rect(screen, YELLOW, (lx2, ly2, lw2, lh2), 2, border_radius=14)
-            lb.draw(screen, fonts, lx2 + 16, ly2 + 16, lw2 - 32)
-            close_hint = fonts["small"].render("Press any key or click to close", True, GRAY)
-            screen.blit(close_hint, (SW // 2 - close_hint.get_width() // 2, ly2 + lh2 - 30))
+            border_col = (255, 100, 40) if lb_page == 1 else YELLOW
+            pygame.draw.rect(screen, PANEL,      (lx2, ly2, lw2, lh2), border_radius=14)
+            pygame.draw.rect(screen, border_col, (lx2, ly2, lw2, lh2), 2, border_radius=14)
+
+            # Draw the correct leaderboard
+            active_lb = lb_hc if lb_page == 1 else lb
+            active_lb.draw(screen, fonts, lx2 + 16, ly2 + 16, lw2 - 32, t=cursor_blink)
+
+            # Page dots
+            for pi in range(2):
+                dot_col = border_col if pi == lb_page else (60, 60, 80)
+                pygame.draw.circle(screen, dot_col,
+                                   (SW // 2 - 10 + pi * 20, ly2 + lh2 - 58), 5)
+
+            # Prev / Next buttons
+            btn_prev = pygame.Rect(lx2 + 16,        ly2 + lh2 - 48, 140, 34)
+            btn_next = pygame.Rect(lx2 + lw2 - 156, ly2 + lh2 - 48, 140, 34)
+
+            if lb_page == 1:
+                pygame.draw.rect(screen, lerp_color(PANEL, YELLOW, 0.2), btn_prev, border_radius=8)
+                pygame.draw.rect(screen, YELLOW, btn_prev, 1, border_radius=8)
+                pl = fonts["small"].render("◄ Normal", True, YELLOW)
+                screen.blit(pl, (btn_prev.centerx - pl.get_width() // 2,
+                                  btn_prev.centery - pl.get_height() // 2))
+            else:
+                pygame.draw.rect(screen, lerp_color(PANEL, (255, 100, 40), 0.2), btn_next, border_radius=8)
+                pygame.draw.rect(screen, (255, 100, 40), btn_next, 1, border_radius=8)
+                nl = fonts["small"].render("Hardcore ►", True, (255, 100, 40))
+                screen.blit(nl, (btn_next.centerx - nl.get_width() // 2,
+                                  btn_next.centery - nl.get_height() // 2))
+
+            close_hint = fonts["tiny"].render(
+                "◄/► or A/D to switch pages  •  click outside or any other key to close", True, GRAY)
+            screen.blit(close_hint, (SW // 2 - close_hint.get_width() // 2, ly2 + lh2 - 18))
 
         # ── Patch notes overlay ───────────────────────────────────────────────
         if show_patchnotes:
@@ -6180,22 +6694,17 @@ def username_screen(screen, clock, fonts):
                 "◄/► or A/D to navigate  |  ESC to close", True, GRAY)
             screen.blit(hint_t, (TX + TW // 2 - hint_t.get_width() // 2, TY + TH - 16))
 
-        # ── Top strip — drawn absolutely last so nothing can paint over it ───────
+        # ── Top strip — only shown when an update is waiting ────────────────────
         STRIP_H = 34
         update_available = (
             _update_info.get("version") and
             _update_info["version"] != GAME_VERSION
         )
 
-        # Always draw the bar — amber when update waiting, dark when up to date
         if update_available:
             pygame.draw.rect(screen, (150, 112, 0), (0, 0, SW, STRIP_H))
             pygame.draw.rect(screen, (220, 170, 0), (0, STRIP_H - 1, SW, 1))
-        else:
-            pygame.draw.rect(screen, (14, 14, 22),  (0, 0, SW, STRIP_H))
-            pygame.draw.rect(screen, (35, 35, 52),  (0, STRIP_H - 1, SW, 1))
 
-        if update_available:
             pre_tag   = "  (pre-release)" if _update_info.get("prerelease") else ""
             ver_txt   = f"Update available:  v{_update_info['version']}{pre_tag}"
             notes_txt = (f"  —  {_update_info['notes']}" if _update_info.get("notes") else "")
@@ -6215,25 +6724,61 @@ def username_screen(screen, clock, fonts):
             pygame.draw.rect(screen, (255, 230, 80), update_rect, 1, border_radius=5)
             screen.blit(btn_label, (btn_x + 12,
                                     STRIP_H // 2 - btn_label.get_height() // 2))
+
+            # X close button
+            x_hovered = close_rect.collidepoint(*pygame.mouse.get_pos())
+            x_bg  = (180, 30, 30) if x_hovered else (100, 20, 20)
+            x_brd = (255, 80, 80) if x_hovered else (160, 40, 40)
+            pygame.draw.rect(screen, x_bg,  close_rect, border_radius=6)
+            pygame.draw.rect(screen, x_brd, close_rect, 1, border_radius=6)
+            cx2 = close_rect.centerx; cy2 = close_rect.centery; arm = 8
+            pygame.draw.line(screen, (255, 120, 120), (cx2 - arm, cy2 - arm), (cx2 + arm, cy2 + arm), 2)
+            pygame.draw.line(screen, (255, 120, 120), (cx2 + arm, cy2 - arm), (cx2 - arm, cy2 + arm), 2)
         else:
             update_rect = pygame.Rect(0, 0, 1, 1)   # never hit
 
-        # X close button — always visible in top-right corner of the strip
-        x_hovered = close_rect.collidepoint(*pygame.mouse.get_pos())
-        x_bg  = (180, 30, 30) if x_hovered else (100, 20, 20)
-        x_brd = (255, 80, 80) if x_hovered else (160, 40, 40)
-        pygame.draw.rect(screen, x_bg,  close_rect, border_radius=6)
-        pygame.draw.rect(screen, x_brd, close_rect, 1, border_radius=6)
-        cx2 = close_rect.centerx; cy2 = close_rect.centery; arm = 8
-        pygame.draw.line(screen, (255, 120, 120), (cx2 - arm, cy2 - arm), (cx2 + arm, cy2 + arm), 2)
-        pygame.draw.line(screen, (255, 120, 120), (cx2 + arm, cy2 - arm), (cx2 - arm, cy2 + arm), 2)
+        # ── Quit confirm dialog ───────────────────────────────────────────────
+        if show_quit_confirm:
+            QW, QH = 320, 140
+            QX = SW // 2 - QW // 2; QY = SH // 2 - QH // 2
+            # Dim background
+            dim = pygame.Surface((SW, SH), pygame.SRCALPHA)
+            dim.fill((0, 0, 0, 160))
+            screen.blit(dim, (0, 0))
+            # Panel
+            pygame.draw.rect(screen, (28, 24, 40), (QX, QY, QW, QH), border_radius=12)
+            pygame.draw.rect(screen, (180, 60, 60), (QX, QY, QW, QH), 2, border_radius=12)
+            # Title
+            q_title = fonts["med"].render("Exit game?", True, (255, 220, 220))
+            screen.blit(q_title, (QX + QW // 2 - q_title.get_width() // 2, QY + 20))
+            hint_q  = fonts["tiny"].render("ESC to cancel", True, (120, 110, 130))
+            screen.blit(hint_q, (QX + QW // 2 - hint_q.get_width() // 2, QY + 48))
+            # Buttons
+            mx_q, my_q = pygame.mouse.get_pos()
+            btn_yes = pygame.Rect(QX + 24,       QY + 76, 120, 40)
+            btn_no  = pygame.Rect(QX + QW - 144, QY + 76, 120, 40)
+            yes_hov = btn_yes.collidepoint(mx_q, my_q)
+            no_hov  = btn_no.collidepoint(mx_q, my_q)
+            pygame.draw.rect(screen, (180, 40, 40) if yes_hov else (110, 25, 25),
+                             btn_yes, border_radius=8)
+            pygame.draw.rect(screen, (255, 80, 80), btn_yes, 1, border_radius=8)
+            pygame.draw.rect(screen, (40, 140, 60) if no_hov else (25, 80, 40),
+                             btn_no,  border_radius=8)
+            pygame.draw.rect(screen, (80, 220, 100), btn_no, 1, border_radius=8)
+            yes_lbl = fonts["med"].render("Yes", True, (255, 180, 180))
+            no_lbl  = fonts["med"].render("No",  True, (160, 255, 180))
+            screen.blit(yes_lbl, (btn_yes.centerx - yes_lbl.get_width() // 2,
+                                   btn_yes.centery - yes_lbl.get_height() // 2))
+            screen.blit(no_lbl,  (btn_no.centerx  - no_lbl.get_width()  // 2,
+                                   btn_no.centery  - no_lbl.get_height() // 2))
 
         _scaled_flip(screen)
 
 # ── Main Game ─────────────────────────────────────────────────────────────────
 
 class Game:
-    def __init__(self, username="Player", render_surf=None, window=None, apply_display_fn=None):
+    def __init__(self, username="Player", render_surf=None, window=None,
+                 apply_display_fn=None, checkpoint=None, save_slot=None, hardcore=False):
         # Use the shared render surface passed from the entry point (fixed 1280×720).
         # If called without one (e.g. during testing) fall back to the display surface.
         if render_surf is not None:
@@ -6241,12 +6786,14 @@ class Game:
         else:
             self.screen = pygame.display.set_mode((SW, SH))
         self._window          = window
-        self._apply_display   = apply_display_fn   # callable() → new window Surface
-        self._overlay = pygame.Surface((SW, SH), pygame.SRCALPHA)  # reused every frame
-        pygame.display.set_caption("Dungeon Crawler 43.1b8")
+        self._apply_display   = apply_display_fn
+        self._overlay = pygame.Surface((SW, SH), pygame.SRCALPHA)
+        pygame.display.set_caption("Dungeon Crawler 44.0b12")
         self.clock    = pygame.time.Clock()
         self.world_w  = 3000; self.world_h = 3000
         self.username = username
+        self.save_slot = save_slot
+        self.hardcore  = hardcore
         self.fonts    = {
             "large": _make_font(28, bold=True),
             "med":   _make_font(20, bold=True),
@@ -6254,10 +6801,65 @@ class Game:
             "tiny":  _make_font(13),
             "huge":  _make_font(48, bold=True),
         }
-        self.leaderboard = Leaderboard()
-        self.lb_rank     = None   # rank achieved this run (set on death)
+        self.leaderboard    = Leaderboard(hardcore=False)
+        self.leaderboard_hc = Leaderboard(hardcore=True)
+        self.lb_rank        = None
         self.reset()
+        if checkpoint:
+            self._apply_checkpoint(checkpoint)
         MUSIC.play("battle")
+
+    def _apply_checkpoint(self, cp):
+        """Restore full player + game state from a checkpoint dict."""
+        p = self.player
+        p.username  = cp.get("username", p.username)
+        saved_wave  = cp.get("wave", 1)
+        self.boss_killed = cp.get("boss_killed", 0)
+        p.level     = cp.get("level", 1)
+        p.xp        = cp.get("xp", 0)
+        p.xp_to_next = cp.get("xp_to_next", 100)
+        p.max_hp    = cp.get("max_hp", 100)
+        p.hp        = max(1, cp.get("hp", 100))
+        p.gold      = cp.get("gold", 0)
+        p.kill_count = cp.get("kill_count", 0)
+        p.corruption_waves_cleared = cp.get("corruption_waves_cleared", 0)
+        # Weapons
+        owned = cp.get("owned_weapons", [0])
+        p.owned_weapons = [int(w) for w in owned]
+        widx = cp.get("weapon_idx", 0)
+        p.weapon_idx = widx if widx in p.owned_weapons else p.owned_weapons[0]
+        # Perks
+        p.perks = {str(k): float(v) for k, v in cp.get("perks", {}).items()}
+        # Restore hardcore flag
+        self.hardcore = cp.get("hardcore", False)
+        # Wave state — set wave to (saved_wave) so the break's wave += 1 lands on saved_wave + 1.
+        # The player resumes from the wave AFTER the one they saved on.
+        self.wave              = saved_wave
+        self.wave_active       = False
+        self.wave_enemy_count  = 0
+        self.boss_wave         = False
+        self.elite_wave        = False
+        self.spawn_timer       = 0
+        self.spawn_interval    = max(40, 90 - saved_wave * 3)
+        self.wave_enemy_target = self._wave_size(saved_wave + 1)
+        self.break_timer       = WAVE_BREAK_SECS * FPS
+        self.enemies           = []
+        # Restore any uncollected world drops
+        self.gold_coins = [
+            GoldCoin(gc["x"], gc["y"], gc["amount"])
+            for gc in cp.get("gold_coins", [])
+        ]
+        # Freeze restored coins in place (no initial scatter velocity)
+        for gc in self.gold_coins:
+            gc.vx = 0.0; gc.vy = 0.0
+        self.hp_orbs = [
+            HpOrb(orb["x"], orb["y"], orb["amount"])
+            for orb in cp.get("hp_orbs", [])
+        ]
+        for orb in self.hp_orbs:
+            orb.vx = 0.0; orb.vy = 0.0
+        print(f"[Checkpoint] Loaded: resuming after wave {saved_wave}, level {p.level}, "
+              f"{len(p.perks)} perks")
 
     def reset(self):
         self.player         = Player(self.world_w // 2, self.world_h // 2, self.username)
@@ -6270,6 +6872,7 @@ class Game:
         self.hp_orbs        = []
         self.shop           = Shop()
         self.perk_screen    = PerkScreen(self.player, self.fonts)
+        self.pending_save   = False   # True when a save is deferred until perk screen closes
         self.game_over      = False
         self.paused         = False
         self.lb_rank        = None
@@ -6527,11 +7130,12 @@ class Game:
         # Big gold + XP reward
         for _ in range(12):
             self.gold_coins.append(GoldCoin(b.x, b.y, b.gold_drop // 12))
-        # Boss HP orbs — scatter 3–5 orbs worth 20 HP each
-        for _ in range(random.randint(3, 5)):
-            ox = random.uniform(-60, 60)
-            oy = random.uniform(-60, 60)
-            self.hp_orbs.append(HpOrb(b.x + ox, b.y + oy, 20))
+        # Boss HP orbs — scatter 3–5 orbs worth 20 HP each (not in hardcore)
+        if not self.hardcore:
+            for _ in range(random.randint(3, 5)):
+                ox = random.uniform(-60, 60)
+                oy = random.uniform(-60, 60)
+                self.hp_orbs.append(HpOrb(b.x + ox, b.y + oy, 20))
         self.floating_texts.append(
             FloatingText(b.x, b.y - 60, f"BOSS SLAIN! +{b.gold_drop}g", YELLOW, 26))
         self.floating_texts.append(
@@ -6545,6 +7149,8 @@ class Game:
                              f"LEVEL UP!  {self.player.level}", CYAN, 22))
         # Always offer a perk after a boss
         self.perk_screen.offer()
+        # Defer save until after the perk is picked (or immediately if no slot assigned)
+        self.pending_save = True
 
     def _skip_wave(self):
         """Dev tool: instantly end the current wave/boss and jump to the break."""
@@ -7120,8 +7726,17 @@ class Game:
         pygame.draw.rect(self.screen, CYAN,  (0, 0, 250, panel_h), 1, border_radius=8)
         self.screen.blit(self.fonts["large"].render(f"Lvl {p.level}", True, YELLOW), (12, 8))
         self.screen.blit(self.fonts["small"].render(f"Kills: {p.kill_count}", True, WHITE), (120, 14))
+        if self.hardcore:
+            # Red outline around HP bar
+            pygame.draw.rect(self.screen, (200, 30, 30), (8, 40, 234, 20), 2, border_radius=4)
         draw_bar(self.screen, 10, 42, 230, 16, p.hp, p.max_hp, (50, 220, 80))
         self.screen.blit(self.fonts["small"].render(f"HP {p.hp}/{p.max_hp}", True, WHITE), (12, 44))
+        # Hardcore indicator: flaming skulls on each side of the HP bar
+        if self.hardcore:
+            _ht = pygame.time.get_ticks() // 16
+            skull_cy = 42 + 8   # vertically centred on the HP bar
+            draw_flaming_skull(self.screen, 4,   skull_cy, _ht,      size=7)
+            draw_flaming_skull(self.screen, 238, skull_cy, _ht + 15, size=7)
         if p.level >= p.LEVEL_CAP:
             draw_bar(self.screen, 10, 66, 230, 12, 1, 1, BLUE)
             self.screen.blit(self.fonts["tiny"].render("XP  MAX LEVEL", True, (180, 180, 255)), (12, 68))
@@ -7325,8 +7940,10 @@ class Game:
         pygame.draw.rect(self.screen, PANEL, (lb_x, lb_y, lb_w, lb_h), border_radius=12)
         pygame.draw.rect(self.screen, YELLOW, (lb_x, lb_y, lb_w, lb_h), 1, border_radius=12)
 
-        self.leaderboard.draw(self.screen, self.fonts, lb_x + 12, lb_y + 14,
-                              lb_w - 24, highlight_name=self.player.username)
+        active_lb = self.leaderboard_hc if self.hardcore else self.leaderboard
+        active_lb.draw(self.screen, self.fonts, lb_x + 12, lb_y + 14,
+                       lb_w - 24, highlight_name=self.player.username,
+                       t=pygame.time.get_ticks() // 16)
 
         # Restart hint at bottom centre
         restart = self.fonts["large"].render("Press R to return to menu", True, YELLOW)
@@ -7343,7 +7960,8 @@ class Game:
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
                     pygame.quit(); sys.exit()
-                # Always let perk screen consume events when active
+                if event.type == pygame.USEREVENT + 1:
+                    MUSIC.on_track_end()
                 if self.perk_screen.active:
                     self.perk_screen.handle_event(event)
                     continue
@@ -7470,15 +8088,14 @@ class Game:
                 if self.paused and self.pause_settings:
                     if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                         px2, py2 = event.pos
-                        PSX = SW // 2 - 210; PSY = SH // 2 - 230
-                        PSW = 420; PSH = 470
-                        SLX = PSX + 80; SLW = PSW - 160
+                        PSX = SW // 2 - 210; PSY = SH // 2 - 190
+                        PSW = 420;           PSH = 390
+                        SLX = PSX + 80;      SLW = PSW - 160
                         SLY  = PSY + 100
                         SLY2 = PSY + 182
                         PQY  = PSY + 242
                         PHY  = PSY + 298
-                        PRY  = PSY + 358
-                        PFY  = PSY + 418
+                        PFY  = PSY + 354
                         pbw2 = (PSW - 60) // 2
                         if SLX - 10 <= px2 <= SLX + SLW + 10 and SLY - 14 <= py2 <= SLY + 14:
                             self.pause_slider_drag = "music"
@@ -7617,9 +8234,14 @@ class Game:
                 # When animation ends, trigger game over
                 if self.death_anim_timer == 0:
                     self.game_over = True
-                    self.lb_rank = self.leaderboard.submit(
+                    active_lb = self.leaderboard_hc if self.hardcore else self.leaderboard
+                    self.lb_rank = active_lb.submit(
                         self.player.username, self.wave, self.player.level,
                         self.player.kill_count, self.boss_killed)
+                    # Hardcore: wipe the save slot on death
+                    if self.hardcore and self.save_slot:
+                        delete_checkpoint(self.save_slot)
+                        print(f"[Hardcore] Slot {self.save_slot} deleted on death.")
                 continue
 
             if self.game_over:
@@ -7629,6 +8251,11 @@ class Game:
                 continue
 
             if not self.shop.open and not self.perk_screen.active and not self.paused:
+                # ── Flush deferred save (triggered after wave clear / boss kill) ─
+                if self.pending_save and self.save_slot:
+                    save_checkpoint(self, self.save_slot)
+                    self.pending_save = False
+
                 self.player._enemies_ref = self.enemies
                 self.player._boss_ref    = [b for b in [self.boss, self.boss_clone] if b and b.alive]
                 self.player.update(keys, mx, my, cam, self.projectiles,
@@ -7672,8 +8299,13 @@ class Game:
                             self.elite_wave = False
                             if self.wave % 5 == 0 and self.wave % 10 != 0:
                                 self.perk_screen.offer()
+                            # Defer save until after perk screen (if open) or immediately
+                            self.pending_save = True
                 else:
                     self.break_timer -= 1
+                    # ── Second save: last frame of break — shop purchases & drops captured ─
+                    if self.break_timer == 1 and self.save_slot:
+                        save_checkpoint(self, self.save_slot)
                     if self.break_timer <= 0:
                         self.wave             += 1
                         self.wave_active       = True
@@ -7791,7 +8423,7 @@ class Game:
                                                      f"LEVEL UP!  {self.player.level}", CYAN, 22))
                                 for _ in range(10):
                                     self.particles.append(Particle(e.x, e.y, e.color))
-                                if random.random() < 0.10 and len(self.hp_orbs) < 5:
+                                if not self.hardcore and random.random() < 0.10 and len(self.hp_orbs) < 5:
                                     hp_amt = 10 if e.elite else 5
                                     self.hp_orbs.append(HpOrb(e.x, e.y, hp_amt))
 
@@ -7876,7 +8508,7 @@ class Game:
                                     for _ in range(12):
                                         self.particles.append(Particle(e.x, e.y, e.color))
                                     # ── HP orb drop (10% chance, max 5 orbs on screen) ──
-                                    if random.random() < 0.10 and len(self.hp_orbs) < 5:
+                                    if not self.hardcore and random.random() < 0.10 and len(self.hp_orbs) < 5:
                                         hp_amt = 10 if e.elite else 5
                                         self.hp_orbs.append(HpOrb(e.x, e.y, hp_amt))
                                     # ── On-death specials ──────────────────────
@@ -8692,7 +9324,7 @@ def apply_display_mode(current_window):
 
 if __name__ == "__main__":
     _window = apply_display_mode(None)
-    pygame.display.set_caption("Dungeon Crawler 43.1b8")
+    pygame.display.set_caption("Dungeon Crawler 44.0b12")
 
     # Window icon
     _icon_path = asset("icon.png")
@@ -8714,14 +9346,13 @@ if __name__ == "__main__":
         # With pygame.SCALED active, the display surface is the 1280×720 logical
         # canvas — draw directly to it so SCALED's mouse remapping works correctly.
         _screen = pygame.display.get_surface()
-        chosen_name = username_screen(_screen, _clock, _fonts)
+        chosen_name, chosen_cp, chosen_slot, chosen_hardcore = username_screen(_screen, _clock, _fonts)
 
-        # Re-apply display mode in case settings changed during the menu,
-        # then fetch the (possibly new) display surface for the game.
         _window = apply_display_mode(_window)
         _screen = pygame.display.get_surface()
 
         result = Game(username=chosen_name, render_surf=_screen,
-                      window=_window, apply_display_fn=apply_display_mode).run()
-        # result == "menu" → loop back; re-apply in case settings changed in-game
+                      window=_window, apply_display_fn=apply_display_mode,
+                      checkpoint=chosen_cp, save_slot=chosen_slot,
+                      hardcore=chosen_hardcore).run()
         _window = apply_display_mode(_window)
