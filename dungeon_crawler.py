@@ -99,6 +99,21 @@ class Music:
     # Candidates tried in order when loading a track
     EXTENSIONS = [".ogg", ".mp3", ".wav"]
 
+    # Per-track gain multipliers — adjust these to level-match all music.
+    # 1.0 = full user volume; 0.7 = 30% quieter than full; etc.
+    # Raise a value if a track is too quiet, lower it if too loud.
+    TRACK_GAIN = {
+        "menu":             0.85,
+        "shop":             0.80,
+        "battle":           0.90,
+        "corruption_wave":  0.85,
+        "boss_malachar":    0.85,
+        "boss_vexara":      0.85,
+        "boss_gorvak":      0.85,
+        "boss_seraphix":    0.85,
+        "boss_nyxoth":      0.85,
+    }
+
     def __init__(self):
         self._current          = None   # track key currently loaded/playing
         self._resume_offset_s  = 0.0   # file-position offset from the last seek
@@ -115,6 +130,12 @@ class Music:
                 return path
         return None
 
+    def _effective_volume(self, key=None):
+        """Return the actual pygame volume for the given track key (or current track)."""
+        k    = key if key is not None else self._current
+        gain = self.TRACK_GAIN.get(k, 1.0) if k else 1.0
+        return max(0.0, min(1.0, self.volume * gain))
+
     def play(self, key, loops=-1, fadein=800):
         """Play a track by key (e.g. 'menu', 'battle', 'boss_malachar').
         Does nothing if already playing the same track or file not found."""
@@ -129,11 +150,8 @@ class Music:
         try:
             pygame.mixer.music.fadeout(400)
             pygame.mixer.music.load(path)
-            pygame.mixer.music.set_volume(self.volume)
+            pygame.mixer.music.set_volume(self._effective_volume(key))
             pygame.mixer.music.play(loops, fade_ms=fadein)
-            # Post a custom event when the track reaches its end so we can reset
-            # _resume_offset_s — without this, a looping track accumulates an ever-
-            # growing offset that makes position-based seek fail on the second loop.
             pygame.mixer.music.set_endevent(pygame.USEREVENT + 1)
             self._current         = key
             self._resume_offset_s = 0.0
@@ -184,14 +202,12 @@ class Music:
             return
         try:
             pygame.mixer.music.load(path)
-            pygame.mixer.music.set_volume(self.volume)
+            pygame.mixer.music.set_volume(self._effective_volume(key))
             try:
                 pygame.mixer.music.play(-1, start=pos_s)
                 self._current         = key
                 self._resume_offset_s = pos_s
             except pygame.error:
-                # Seeking not supported for this codec (e.g. OGG on some backends
-                # after a loop) — fall back to playing from the start
                 pygame.mixer.music.play(-1)
                 self._current         = key
                 self._resume_offset_s = 0.0
@@ -201,7 +217,8 @@ class Music:
     def set_volume(self, vol):
         self.volume = max(0.0, min(1.0, vol))
         if self.enabled:
-            pygame.mixer.music.set_volume(self.volume)
+            # Apply per-track gain so the current track's level stays correct
+            pygame.mixer.music.set_volume(self._effective_volume())
 
 
 # Global music instance — created once, shared everywhere
@@ -230,6 +247,7 @@ class SFX:
         sfx_slime_spit.wav              – slime spits a blob
         sfx_level_up.wav                – player levels up
         sfx_shoot_corrupted_homing.wav  – Corrupted Seeker fires a homing bolt
+        sfx_achievement.wav             – achievement unlocked toast
     """
 
     EXTENSIONS = [".wav", ".ogg", ".mp3"]
@@ -404,7 +422,7 @@ class Leaderboard:
         y += 38
 
         pygame.draw.line(surf, (70, 70, 90), (x, y), (x + w, y), 1)
-        col_x   = [x + 4, x + 32, x + 170, x + 270, x + 340, x + 410]
+        col_x = [x + 4, x + 32, x + 170, x + 270, x + 340, x + 410]
         headers = ["#", "Name", "Wave", "Level", "Kills", "Bosses"]
         for cx, hdr in zip(col_x, headers):
             hs = fonts["tiny"].render(hdr, True, GRAY)
@@ -450,7 +468,7 @@ class Leaderboard:
 TOKEN_FILE = os.path.join(DATA_DIR, "tokens.json")
 
 class TokenWallet:
-    """Persistent token + cosmetic storage — survives game restarts and exe launches."""
+    """Persistent token + cosmetic + title storage."""
 
     def __init__(self):
         data          = self._load_raw()
@@ -458,23 +476,29 @@ class TokenWallet:
         saved_owned   = data.get("owned_cosmetics", ["default"])
         self.owned_cosmetics  = set(saved_owned) | {"default"}
         self.active_cosmetic  = data.get("active_cosmetic", "default")
+        self.owned_titles     = set(data.get("owned_titles", ["none"])) | {"none"}
+        self.active_title     = data.get("active_title", "none")
+        self.cases            = max(0, int(data.get("cases", 0)))
         self.seraphix_kills   = max(0, int(data.get("seraphix_kills", 0)))
         self.nyxoth_kills     = max(0, int(data.get("nyxoth_kills", 0)))
         self.vexara_kills     = max(0, int(data.get("vexara_kills", 0)))
         self.malachar_kills   = max(0, int(data.get("malachar_kills", 0)))
         self.gorvak_kills     = max(0, int(data.get("gorvak_kills", 0)))
-        # Validation against COSMETICS happens lazily in sync_to_player()
-        # because COSMETICS isn't defined yet when TOKENS is first created.
 
     def sync_to_player(self, player):
-        """Call after COSMETICS is defined to validate and push data onto a Player."""
+        """Push cosmetic + title data onto a Player after COSMETICS/TITLES are defined."""
         valid_ids = {c["id"] for c in COSMETICS} | {"default"}
-        # Remove any cosmetics that no longer exist in the game
         self.owned_cosmetics = self.owned_cosmetics & valid_ids | {"default"}
         if self.active_cosmetic not in self.owned_cosmetics:
             self.active_cosmetic = "default"
         player.owned_cosmetics = set(self.owned_cosmetics)
         player.active_cosmetic = self.active_cosmetic
+        valid_title_ids = {t["id"] for t in TITLES}
+        self.owned_titles = (self.owned_titles & valid_title_ids) | {"none"}
+        if self.active_title not in self.owned_titles:
+            self.active_title = "none"
+        player.owned_titles  = set(self.owned_titles)
+        player.active_title  = self.active_title
 
     def _load_raw(self):
         try:
@@ -490,6 +514,9 @@ class TokenWallet:
                     "tokens":          self.total,
                     "owned_cosmetics": list(self.owned_cosmetics),
                     "active_cosmetic": self.active_cosmetic,
+                    "owned_titles":    list(self.owned_titles),
+                    "active_title":    self.active_title,
+                    "cases":           self.cases,
                     "seraphix_kills":  self.seraphix_kills,
                     "nyxoth_kills":    self.nyxoth_kills,
                     "vexara_kills":    self.vexara_kills,
@@ -498,6 +525,18 @@ class TokenWallet:
                 }, f, indent=2)
         except Exception as e:
             print(f"[Tokens] Could not save: {e}")
+
+    def add_case(self, amount=1):
+        self.cases += amount
+        self._save()
+
+    def spend_case(self):
+        """Spend one case. Returns True if successful."""
+        if self.cases > 0:
+            self.cases -= 1
+            self._save()
+            return True
+        return False
 
     def earn(self, amount=1):
         self.total += amount
@@ -519,25 +558,29 @@ class TokenWallet:
             self.active_cosmetic = cosm_id
             self._save()
 
-    def record_seraphix_kill(self):
-        self.seraphix_kills += 1
+    def unlock_title(self, title_id):
+        self.owned_titles.add(title_id)
         self._save()
+
+    def equip_title(self, title_id):
+        if title_id in self.owned_titles:
+            self.active_title = title_id
+            self._save()
+
+    def record_seraphix_kill(self):
+        self.seraphix_kills += 1; self._save()
 
     def record_nyxoth_kill(self):
-        self.nyxoth_kills += 1
-        self._save()
+        self.nyxoth_kills += 1; self._save()
 
     def record_vexara_kill(self):
-        self.vexara_kills += 1
-        self._save()
+        self.vexara_kills += 1; self._save()
 
     def record_malachar_kill(self):
-        self.malachar_kills += 1
-        self._save()
+        self.malachar_kills += 1; self._save()
 
     def record_gorvak_kill(self):
-        self.gorvak_kills += 1
-        self._save()
+        self.gorvak_kills += 1; self._save()
 
 
 # Global wallet — loaded once, shared by all runs in a session
@@ -548,6 +591,7 @@ TOKENS = TokenWallet()
 SETTINGS_FILE  = os.path.join(DATA_DIR, "settings.json")
 FIRST_RUN_FILE = os.path.join(DATA_DIR, "first_run.json")
 CHECKPOINT_FILE = os.path.join(DATA_DIR, "checkpoint.json")   # legacy, unused now
+PROFILE_FILE    = os.path.join(DATA_DIR, "profile.json")
 NUM_SAVE_SLOTS  = 5
 
 def _slot_path(slot):
@@ -591,28 +635,324 @@ class GameSettings:
 
 
 GAME_SETTINGS = GameSettings()
-# Apply persisted volumes immediately
 MUSIC.set_volume(GAME_SETTINGS.music_volume)
 SOUNDS.set_volume(GAME_SETTINGS.sounds_volume)
 
-# --- Constants ---
+# ── Constants ────────────────────────────────────────────────────────────────
 SW, SH = 1280, 720
 FPS = 60
-WHITE  = (255,255,255)
-BLACK  = (0,0,0)
-RED    = (220, 50, 50)
-GREEN  = (50, 200, 80)
-BLUE   = (50, 120, 220)
-YELLOW = (255, 215, 0)
-ORANGE = (255, 140, 0)
-PURPLE = (160, 50, 200)
-CYAN   = (0, 200, 220)
-GRAY   = (100, 100, 110)
-DARK   = (18, 18, 28)
-PANEL  = (28, 28, 42)
-
+WHITE  = (255,255,255); BLACK  = (0,0,0);     RED    = (220, 50, 50)
+GREEN  = (50, 200, 80);  BLUE   = (50, 120, 220); YELLOW = (255, 215, 0)
+ORANGE = (255, 140, 0);  PURPLE = (160, 50, 200); CYAN   = (0, 200, 220)
+GRAY   = (100, 100, 110); DARK  = (18, 18, 28);   PANEL  = (28, 28, 42)
 WAVE_BREAK_SECS = 10
-GAME_VERSION    = "44.0b12"
+GAME_VERSION    = "45.0b10"
+
+# ── Achievement definitions ──────────────────────────────────────────────────
+# cat: "bosses"|"levels"|"waves"|"kills"|"cosmetics"|"weapons"|"hardcore"|"meta"
+ACHIEVEMENTS = [
+    # Boss kills
+    {"id":"kill_malachar",   "name":"The Unkillable Killed","desc":"Defeat Malachar the Undying",              "cat":"bosses",   "tokens":1},
+    {"id":"kill_vexara",     "name":"Hex Broken",           "desc":"Defeat Vexara the Hex-Weaver",             "cat":"bosses",   "tokens":1},
+    {"id":"kill_gorvak",     "name":"Iron Shattered",       "desc":"Defeat Gorvak Ironhide",                   "cat":"bosses",   "tokens":1},
+    {"id":"kill_seraphix",   "name":"Angel Fallen",         "desc":"Defeat Seraphix the Fallen",               "cat":"bosses",   "tokens":1},
+    {"id":"kill_nyxoth",     "name":"Abyss Conquered",      "desc":"Defeat Nyxoth the Abyssal",                "cat":"bosses",   "tokens":1},
+    {"id":"kill_all_bosses", "name":"Boss of Bosses",       "desc":"Defeat all 5 bosses in a single run",      "cat":"bosses",   "tokens":3},
+    # Levels
+    {"id":"level_10", "name":"Rising Fighter",  "desc":"Reach level 10",                        "cat":"levels","tokens":1},
+    {"id":"level_25", "name":"Seasoned Warrior", "desc":"Reach level 25",                        "cat":"levels","tokens":1},
+    {"id":"level_35", "name":"Battle-Hardened",  "desc":"Reach level 35",                        "cat":"levels","tokens":2},
+    {"id":"level_50", "name":"Veteran Slayer",   "desc":"Reach level 50",                        "cat":"levels","tokens":2},
+    {"id":"level_75", "name":"Dungeon Legend",   "desc":"Reach level 75",                        "cat":"levels","tokens":3},
+    {"id":"level_85", "name":"Apex Predator",    "desc":"Reach level 85",                        "cat":"levels","tokens":3},
+    {"id":"level_95", "name":"Near Untouchable", "desc":"Reach level 95",                        "cat":"levels","tokens":4},
+    {"id":"level_99", "name":"Maximum Power",    "desc":"Reach the maximum level — 99",          "cat":"levels","tokens":5},
+    # Wave milestones (cleared on boss wave)
+    {"id":"wave_10",  "name":"First Reckoning",   "desc":"Clear wave 10",   "cat":"waves","tokens":1},
+    {"id":"wave_20",  "name":"Relentless",         "desc":"Clear wave 20",   "cat":"waves","tokens":1},
+    {"id":"wave_30",  "name":"Into the Deep",      "desc":"Clear wave 30",   "cat":"waves","tokens":1},
+    {"id":"wave_40",  "name":"No Rest",            "desc":"Clear wave 40",   "cat":"waves","tokens":2},
+    {"id":"wave_50",  "name":"Halfway to Madness", "desc":"Clear wave 50",   "cat":"waves","tokens":2},
+    {"id":"wave_60",  "name":"Dungeon Conqueror",  "desc":"Clear wave 60",   "cat":"waves","tokens":2},
+    {"id":"wave_70",  "name":"Unyielding",         "desc":"Clear wave 70",   "cat":"waves","tokens":3},
+    {"id":"wave_80",  "name":"Siege Breaker",      "desc":"Clear wave 80",   "cat":"waves","tokens":3},
+    {"id":"wave_90",  "name":"Doom Incarnate",     "desc":"Clear wave 90",   "cat":"waves","tokens":4},
+    {"id":"wave_100", "name":"Endless Slaughter",  "desc":"Clear wave 100",  "cat":"waves","tokens":5},
+    # Enemy kills (cumulative across all runs)
+    {"id":"kills_500",    "name":"First Blood",       "desc":"Kill 500 enemies total",       "cat":"kills","tokens":1},
+    {"id":"kills_1000",   "name":"Bloodthirsty",      "desc":"Kill 1,000 enemies total",     "cat":"kills","tokens":1},
+    {"id":"kills_5000",   "name":"Mass Executioner",  "desc":"Kill 5,000 enemies total",     "cat":"kills","tokens":2},
+    {"id":"kills_10000",  "name":"Serial Slayer",     "desc":"Kill 10,000 enemies total",    "cat":"kills","tokens":2},
+    {"id":"kills_50000",  "name":"Unstoppable Force", "desc":"Kill 50,000 enemies total",    "cat":"kills","tokens":3},
+    {"id":"kills_100000", "name":"Slayer Master",     "desc":"Kill 100,000 enemies — true mastery","cat":"kills","tokens":5},
+    # Cosmetics
+    {"id":"cosm_wings",     "name":"Wings of the Fallen","desc":"Unlock the Seraph Wings cosmetic",  "cat":"cosmetics","tokens":2},
+    {"id":"cosm_blackhole", "name":"Event Horizon",      "desc":"Unlock the Black Hole cosmetic",    "cat":"cosmetics","tokens":2},
+    {"id":"cosm_hexweaver", "name":"Chaos Theory",       "desc":"Unlock the Hex Weaver cosmetic",    "cat":"cosmetics","tokens":2},
+    {"id":"cosm_lavalord",  "name":"Born of Fire",       "desc":"Unlock the Lava Lord cosmetic",     "cat":"cosmetics","tokens":2},
+    {"id":"cosm_ironhide",  "name":"Iron Legacy",        "desc":"Unlock the Ironhide cosmetic",      "cat":"cosmetics","tokens":2},
+    {"id":"cosm_all",       "name":"Collector",          "desc":"Unlock every cosmetic",             "cat":"cosmetics","tokens":5},
+    # Weapons
+    {"id":"weapon_master",  "name":"Arsenal Complete",   "desc":"Own all weapons in a single run",   "cat":"weapons","tokens":3},
+    # Gold collected (cumulative across all runs)
+    {"id":"gold_50000",   "name":"Coin Hoarder",      "desc":"Collect 50,000 gold total",       "cat":"gold","tokens":1},
+    {"id":"gold_100000",  "name":"Gold Rush",          "desc":"Collect 100,000 gold total",      "cat":"gold","tokens":2},
+    {"id":"gold_250000",  "name":"Treasure Hunter",    "desc":"Collect 250,000 gold total",      "cat":"gold","tokens":2},
+    {"id":"gold_500000",  "name":"Vault Breaker",      "desc":"Collect 500,000 gold total",      "cat":"gold","tokens":3},
+    {"id":"gold_1000000", "name":"The Gilded Reaper",  "desc":"Collect 1,000,000 gold total — legendary wealth", "cat":"gold","tokens":5},
+    # Hardcore
+    {"id":"hc_kill_malachar",   "name":"[HC] The Unkillable Killed","desc":"Defeat Malachar in Hardcore",            "cat":"hardcore","tokens":2},
+    {"id":"hc_kill_vexara",     "name":"[HC] Hex Broken",           "desc":"Defeat Vexara in Hardcore",              "cat":"hardcore","tokens":2},
+    {"id":"hc_kill_gorvak",     "name":"[HC] Iron Shattered",       "desc":"Defeat Gorvak in Hardcore",              "cat":"hardcore","tokens":2},
+    {"id":"hc_kill_seraphix",   "name":"[HC] Angel Fallen",         "desc":"Defeat Seraphix in Hardcore",            "cat":"hardcore","tokens":2},
+    {"id":"hc_kill_nyxoth",     "name":"[HC] Abyss Conquered",      "desc":"Defeat Nyxoth in Hardcore",              "cat":"hardcore","tokens":2},
+    {"id":"hc_kill_all_bosses", "name":"[HC] Boss of Bosses",       "desc":"Defeat all 5 bosses in a Hardcore run",  "cat":"hardcore","tokens":5},
+    {"id":"hc_wave_10",  "name":"[HC] First Reckoning",   "desc":"Clear wave 10 in Hardcore",  "cat":"hardcore","tokens":2},
+    {"id":"hc_wave_20",  "name":"[HC] Relentless",        "desc":"Clear wave 20 in Hardcore",  "cat":"hardcore","tokens":2},
+    {"id":"hc_wave_30",  "name":"[HC] Into the Deep",     "desc":"Clear wave 30 in Hardcore",  "cat":"hardcore","tokens":2},
+    {"id":"hc_wave_40",  "name":"[HC] No Rest",           "desc":"Clear wave 40 in Hardcore",  "cat":"hardcore","tokens":3},
+    {"id":"hc_wave_50",  "name":"[HC] Halfway to Madness","desc":"Clear wave 50 in Hardcore",  "cat":"hardcore","tokens":3},
+    {"id":"hc_kills_500",    "name":"[HC] First Blood",       "desc":"Kill 500 enemies in Hardcore",   "cat":"hardcore","tokens":2},
+    {"id":"hc_kills_1000",   "name":"[HC] Bloodthirsty",      "desc":"Kill 1,000 enemies in Hardcore", "cat":"hardcore","tokens":2},
+    {"id":"hc_kills_5000",   "name":"[HC] Mass Executioner",  "desc":"Kill 5,000 enemies in Hardcore", "cat":"hardcore","tokens":3},
+    {"id":"hc_weapon_master","name":"[HC] Arsenal Complete",  "desc":"Own all weapons in a Hardcore run","cat":"hardcore","tokens":4},
+    {"id":"hc_survivor",     "name":"Hardcore Survivor",      "desc":"Complete any Hardcore run (any wave)","cat":"hardcore","tokens":3},
+    # Meta
+    {"id":"all_achievements","name":"True Legend",
+     "desc":"Unlock every achievement including all Hardcore ones — grants the True Legend cosmetic",
+     "cat":"meta","tokens":0},
+]
+ACHIEVEMENT_IDS = {a["id"] for a in ACHIEVEMENTS}
+
+
+class Profile:
+    """Global player profile — username, avatar, account XP/level, achievements."""
+    XP_PER_LEVEL = 5  # flat, no scaling
+
+    def __init__(self):
+        data = self._load()
+        self.username           = data.get("username", "")
+        self.image_path         = data.get("image_path", "")
+        self.account_xp         = max(0, int(data.get("account_xp", 0)))
+        self.unlocked           = set(data.get("unlocked_achievements", []))
+        self.total_kills        = max(0, int(data.get("total_kills", 0)))
+        self.hc_total_kills     = max(0, int(data.get("hc_total_kills", 0)))
+        self.total_gold         = max(0, int(data.get("total_gold", 0)))
+        self.max_wave_reached   = max(0, int(data.get("max_wave_reached", 0)))
+        self.hc_max_wave_reached = max(0, int(data.get("hc_max_wave_reached", 0)))
+        self._avatar_surf       = None
+        self._avatar_path_cache = None
+
+    @property
+    def account_level(self):
+        return self.account_xp // self.XP_PER_LEVEL
+
+    def exists(self):
+        return bool(self.username.strip())
+
+    def _load(self):
+        try:
+            with open(PROFILE_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            return {}
+
+    def save(self):
+        try:
+            with open(PROFILE_FILE, "w", encoding="utf-8") as f:
+                json.dump({
+                    "username":              self.username,
+                    "image_path":            self.image_path,
+                    "account_xp":            self.account_xp,
+                    "unlocked_achievements": list(self.unlocked),
+                    "total_kills":           self.total_kills,
+                    "hc_total_kills":        self.hc_total_kills,
+                    "total_gold":            self.total_gold,
+                    "max_wave_reached":      self.max_wave_reached,
+                    "hc_max_wave_reached":   self.hc_max_wave_reached,
+                }, f, indent=2)
+        except Exception as e:
+            print(f"[Profile] Could not save: {e}")
+
+    def unlock(self, ach_id):
+        """Unlock an achievement. Awards tokens + 1 account XP (2 for hardcore).
+        Returns True if newly unlocked."""
+        if ach_id in self.unlocked or ach_id not in ACHIEVEMENT_IDS:
+            return False
+        self.unlocked.add(ach_id)
+        ach    = next(a for a in ACHIEVEMENTS if a["id"] == ach_id)
+        tokens = ach.get("tokens", 0)
+        if tokens > 0:
+            TOKENS.earn(tokens)
+        # 1 XP for normal achievements, 2 XP for hardcore achievements
+        xp_gain = 2 if ach.get("cat") == "hardcore" else 1
+        self.account_xp += xp_gain
+        # Grant any cosmetics tied to this achievement
+        for cosm in COSMETICS:
+            if cosm.get("achievement_unlock") == ach_id:
+                TOKENS.unlock_cosmetic(cosm["id"])
+                # Sync to any live player via TOKENS (next sync_to_player call will pick it up)
+                # Also push directly into owned_cosmetics on the game's player if available
+                import __main__
+                live_game = getattr(__main__, "_live_game", None)
+                if live_game and hasattr(live_game, "player"):
+                    live_game.player.owned_cosmetics.add(cosm["id"])
+        self.save()
+        return True
+
+    def get_progress(self, ach_id):
+        """Return (current, maximum) for achievements with numeric progress, or None."""
+        # Wave achievements
+        WAVE_MAP = {
+            "wave_10":10,"wave_20":20,"wave_30":30,"wave_40":40,"wave_50":50,
+            "wave_60":60,"wave_70":70,"wave_80":80,"wave_90":90,"wave_100":100,
+        }
+        if ach_id in WAVE_MAP:
+            return (min(self.max_wave_reached, WAVE_MAP[ach_id]), WAVE_MAP[ach_id])
+        # HC wave — only show if a HC run has been played (hc_total_kills > 0 or hc_max_wave > 0)
+        HC_WAVE_MAP = {
+            "hc_wave_10":10,"hc_wave_20":20,"hc_wave_30":30,"hc_wave_40":40,"hc_wave_50":50,
+        }
+        if ach_id in HC_WAVE_MAP:
+            if self.hc_max_wave_reached == 0 and self.hc_total_kills == 0:
+                return None   # no HC run played yet — hide progress entirely
+            return (min(self.hc_max_wave_reached, HC_WAVE_MAP[ach_id]), HC_WAVE_MAP[ach_id])
+        # Kill achievements
+        KILL_MAP = {
+            "kills_500":500,"kills_1000":1000,"kills_5000":5000,
+            "kills_10000":10000,"kills_50000":50000,"kills_100000":100000,
+        }
+        if ach_id in KILL_MAP:
+            return (min(self.total_kills, KILL_MAP[ach_id]), KILL_MAP[ach_id])
+        HC_KILL_MAP = {
+            "hc_kills_500":500,"hc_kills_1000":1000,"hc_kills_5000":5000,
+        }
+        if ach_id in HC_KILL_MAP:
+            if self.hc_total_kills == 0:
+                return None
+            return (min(self.hc_total_kills, HC_KILL_MAP[ach_id]), HC_KILL_MAP[ach_id])
+        # Gold achievements
+        GOLD_MAP = {
+            "gold_50000":50000,"gold_100000":100000,"gold_250000":250000,
+            "gold_500000":500000,"gold_1000000":1000000,
+        }
+        if ach_id in GOLD_MAP:
+            return (min(self.total_gold, GOLD_MAP[ach_id]), GOLD_MAP[ach_id])
+        return None
+
+    def get_avatar(self):
+        """Return a cached 64×64 Surface, or None if no image set."""
+        if self.image_path and os.path.isfile(self.image_path):
+            if self._avatar_path_cache != self.image_path:
+                try:
+                    raw = pygame.image.load(self.image_path).convert()
+                    self._avatar_surf       = pygame.transform.smoothscale(raw, (64, 64))
+                    self._avatar_path_cache = self.image_path
+                except pygame.error:
+                    self._avatar_surf = None
+        else:
+            self._avatar_surf = None
+        return self._avatar_surf
+
+    def check_achievements(self, game):
+        """Check all criteria, unlock newly-met achievements.
+        Returns list of newly-unlocked achievement ids."""
+        p   = game.player
+        hc  = game.hardcore
+        new = []
+
+        def _try(aid):
+            if self.unlock(aid):
+                new.append(aid)
+
+        bosses = getattr(game, "_bosses_killed_names", set())
+        all5   = {"Malachar the Undying", "Vexara the Hex-Weaver",
+                  "Gorvak Ironhide", "Seraphix the Fallen", "Nyxoth the Abyssal"}
+
+        # Boss kills
+        if "Malachar the Undying"  in bosses: _try("kill_malachar")
+        if "Vexara the Hex-Weaver" in bosses: _try("kill_vexara")
+        if "Gorvak Ironhide"       in bosses: _try("kill_gorvak")
+        if "Seraphix the Fallen"   in bosses: _try("kill_seraphix")
+        if "Nyxoth the Abyssal"    in bosses: _try("kill_nyxoth")
+        if bosses >= all5:                    _try("kill_all_bosses")
+        if hc:
+            if "Malachar the Undying"  in bosses: _try("hc_kill_malachar")
+            if "Vexara the Hex-Weaver" in bosses: _try("hc_kill_vexara")
+            if "Gorvak Ironhide"       in bosses: _try("hc_kill_gorvak")
+            if "Seraphix the Fallen"   in bosses: _try("hc_kill_seraphix")
+            if "Nyxoth the Abyssal"    in bosses: _try("hc_kill_nyxoth")
+            if bosses >= all5:                    _try("hc_kill_all_bosses")
+
+        # Levels
+        for lv, aid in [(10,"level_10"),(25,"level_25"),(35,"level_35"),(50,"level_50"),
+                         (75,"level_75"),(85,"level_85"),(95,"level_95"),(99,"level_99")]:
+            if p.level >= lv: _try(aid)
+
+        # Waves — update high-water marks
+        w = game.wave
+        self.max_wave_reached = max(self.max_wave_reached, w)
+        if hc:
+            self.hc_max_wave_reached = max(self.hc_max_wave_reached, w)
+        for wt, aid, hc_aid in [
+            (10,"wave_10","hc_wave_10"),(20,"wave_20","hc_wave_20"),
+            (30,"wave_30","hc_wave_30"),(40,"wave_40","hc_wave_40"),
+            (50,"wave_50","hc_wave_50"),(60,"wave_60",None),
+            (70,"wave_70",None),(80,"wave_80",None),(90,"wave_90",None),(100,"wave_100",None),
+        ]:
+            if self.max_wave_reached >= wt:
+                _try(aid)
+                if hc and hc_aid: _try(hc_aid)
+
+        # Kills — only add the delta since the last check, never the full run total
+        kills_delta = p.kill_count - game._ach_kills_credited
+        if kills_delta > 0:
+            self.total_kills    += kills_delta
+            if hc: self.hc_total_kills += kills_delta
+            game._ach_kills_credited = p.kill_count
+        for kt, aid in [(500,"kills_500"),(1000,"kills_1000"),(5000,"kills_5000"),
+                         (10000,"kills_10000"),(50000,"kills_50000"),(100000,"kills_100000")]:
+            if self.total_kills >= kt: _try(aid)
+        for kt, aid in [(500,"hc_kills_500"),(1000,"hc_kills_1000"),(5000,"hc_kills_5000")]:
+            if self.hc_total_kills >= kt: _try(aid)
+
+        # Gold — only add the delta since the last check
+        gold_delta = p.gold - game._ach_gold_credited
+        if gold_delta > 0:
+            self.total_gold         += gold_delta
+            game._ach_gold_credited  = p.gold
+        for gt, aid in [(50000,"gold_50000"),(100000,"gold_100000"),(250000,"gold_250000"),
+                         (500000,"gold_500000"),(1000000,"gold_1000000")]:
+            if self.total_gold >= gt: _try(aid)
+
+        # Cosmetics
+        oc = TOKENS.owned_cosmetics
+        for cosm_id, aid in [("wings","cosm_wings"),("blackhole","cosm_blackhole"),
+                               ("hexweaver","cosm_hexweaver"),("lavalord","cosm_lavalord"),
+                               ("ironhide","cosm_ironhide")]:
+            if cosm_id in oc: _try(aid)
+        if {c["id"] for c in COSMETICS} <= oc: _try("cosm_all")
+
+        # Weapon master
+        all_widx = list(range(len(WEAPONS))) + [1000 + i for i in range(len(SPECIAL_WEAPONS))]
+        if all(wi in p.owned_weapons for wi in all_widx):
+            _try("weapon_master")
+            if hc: _try("hc_weapon_master")
+
+        # Hardcore survivor
+        if hc: _try("hc_survivor")
+
+        # Meta
+        all_except_meta = {a["id"] for a in ACHIEVEMENTS if a["id"] != "all_achievements"}
+        if all_except_meta <= self.unlocked: _try("all_achievements")
+
+        # Always save so accumulators (kills, gold, max_wave) persist even when
+        # no achievement is unlocked this check.
+        self.save()
+        return new
+
+
+PROFILE = Profile()
 
 # ── Online version check ──────────────────────────────────────────────────────
 _GH_API_URL  = ""#"https://api.github.com/repos/gert-leja/dungeon_crawler/releases"
@@ -701,24 +1041,26 @@ threading.Thread(target=_fetch_latest_release, daemon=True).start()
 # Categories: "added", "changed", "fixed", "removed"
 PATCH_NOTES = [
     {
+        "version": "45.0",
+        "date":    "26-03-2026",
+        "changes": [
+            ("added",   "Achievements :O"),
+            ("added",   "Global profile! WOW!"),
+            ("added",   "some other stuff."),
+        ],
+    },
+    {
         "version": "44.0",
         "date":    "26-03-2026",
         "changes": [
             ("added",   "New Hardcore mode, this will delete your save upon death and no HP drops will spawn from enemies."),
             ("added",   "Difficulty options now selectable after picking username."),
             ("added",   "Two different leaderboards, one for normal mode and one for hardcore mode."),
-            ("added",   "Checkpoint functionality, the game saves after every wave, and just before a new wave starts, and is loadable from 'Load Game' in the main menu."),            
+            ("added",   "Checkpoint functionality, the game saves after every wave, and just before a new wave starts, and is loadable from 'Load Game' in the main menu."),
+            ("added",   "Volume equaliser to help control any volume spikes in different songs."),            
             ("changed",   "Main Menu has been reworked, buttons are now in a more organised location."),
             ("fixed",   "Settings menu during a paused game not working."),
             ("fixed",   "Hardcore mode visuals not appearing as intended."),
-        ],
-    },
-    {
-        "version": "43.2",
-        "date":    "26-03-2026",
-        "changes": [
-            ("added",   "'Help' button in the main menu that displays the tutorial."),
-            ("changed", "Updated tutorial information."),
         ],
     },
 ]
@@ -821,9 +1163,105 @@ COSMETICS = [
         "preview": (75, 88, 100),
         "req_gorvak_kills": 15,
     },
+    {
+        "id":         "true_legend",
+        "name":       "True Legend",
+        "desc":       "Awarded to those who unlock every achievement",
+        "cost":       0,
+        "pattern":    "true_legend",
+        "preview":    (255, 80, 200),
+        "achievement_unlock": "all_achievements",   # granted by achievement, not bought
+    },
 ]
 
-# ── Tips (shown on main menu, rotating yellow text) ──────────────────────────
+# ── Title definitions ─────────────────────────────────────────────────────────
+TITLES = [
+    {"id": "none",           "name": "(No Title)",         "desc": "Bare name, no title",              "cost": 0,  "col": (150, 150, 150)},
+    {"id": "adventurer",     "name": "The Adventurer",     "desc": "A classic warrior's title",        "cost": 2,  "col": (100, 200, 255)},
+    {"id": "dungeon_walker", "name": "Dungeon Crawler",    "desc": "You know these halls well",        "cost": 3,  "col": (140, 200, 140)},
+    {"id": "boss_slayer",    "name": "Boss Slayer",        "desc": "Bosses fear your name",            "cost": 5,  "col": (255, 140, 60)},
+    {"id": "undying",        "name": "The Undying",        "desc": "Death has tried and failed",       "cost": 6,  "col": (220, 80,  80)},
+    {"id": "shadow",         "name": "Shadow Master",      "desc": "Unseen until it's too late",     "cost": 6,  "col": (120, 80,  200)},
+    {"id": "gilded",         "name": "The Gilded",         "desc": "Wealth beyond measure",            "cost": 7,  "col": (255, 215, 0)},
+    {"id": "void_touched",   "name": "Void-Touched",       "desc": "Marked by the abyss",              "cost": 8,  "col": (160, 40,  255)},
+    {"id": "warlord",        "name": "Warlord",            "desc": "Armies answer your call",          "cost": 10, "col": (255, 80,  80)},
+    {"id": "storm_caller",   "name": "Storm Caller",       "desc": "Lightning bends to your will",    "cost": 10, "col": (140, 200, 255)},
+    {"id": "ironclad",       "name": "The Ironclad",       "desc": "Unbreakable, unbeatable",          "cost": 12, "col": (160, 180, 200)},
+    {"id": "legend",         "name": "Legend",             "desc": "Few have reached this status",    "cost": 15, "col": (255, 215, 0)},
+    {"id": "champion",       "name": "Champion of the Deep","desc": "Master of the dungeon",           "cost": 18, "col": (80,  220, 255)},
+    {"id": "harbinger",      "name": "Harbinger of Doom",  "desc": "The end comes with you",           "cost": 20, "col": (220, 60,  60)},
+]
+
+# ── Case pool ─────────────────────────────────────────────────────────────────
+RARITY_COMMON    = ("Common",    (160, 160, 160))
+RARITY_UNCOMMON  = ("Uncommon",  (80,  200, 100))
+RARITY_RARE      = ("Rare",      (80,  140, 255))
+RARITY_EPIC      = ("Epic",      (180, 60,  255))
+RARITY_LEGENDARY = ("Legendary", (255, 160, 20))
+
+# ── The Original Collection — case-exclusive cosmetics ───────────────────────
+# These cosmetics are NOT in the token shop; only obtainable by opening cases.
+CASE_COSMETICS = [
+    # ── Common — solid colour variants ──────────────────────────────────────
+    {"id":"case_red",       "name":"Crimson",         "desc":"Bold red — a warrior's colour",       "cost":0,"pattern":"case_red",       "preview":(220,  50,  50)},
+    {"id":"case_green",     "name":"Forest",           "desc":"Deep forest green",                   "cost":0,"pattern":"case_green",     "preview":( 40, 180,  80)},
+    {"id":"case_purple",    "name":"Amethyst",         "desc":"Rich purple glow",                    "cost":0,"pattern":"case_purple",    "preview":(160,  60, 220)},
+    {"id":"case_orange",    "name":"Ember",            "desc":"Warm orange ember",                   "cost":0,"pattern":"case_orange",    "preview":(255, 130,  20)},
+    {"id":"case_pink",      "name":"Rose",             "desc":"Soft rose pink",                      "cost":0,"pattern":"case_pink",      "preview":(255, 100, 180)},
+    # ── Uncommon — simple animated patterns ─────────────────────────────────
+    {"id":"case_stripes",   "name":"Striped",          "desc":"Rotating colour stripes",             "cost":0,"pattern":"case_stripes",   "preview":( 80, 200, 255)},
+    {"id":"case_pulse",     "name":"Pulse",            "desc":"Pulsing concentric rings",            "cost":0,"pattern":"case_pulse",     "preview":(200,  80, 255)},
+    {"id":"case_checker",   "name":"Checkered",        "desc":"Animated chequered pattern",          "cost":0,"pattern":"case_checker",   "preview":(200, 200,  60)},
+    # ── Rare — moving patterns ───────────────────────────────────────────────
+    {"id":"case_wave",      "name":"Wave Rider",       "desc":"Rippling wave pattern",               "cost":0,"pattern":"case_wave",      "preview":( 40, 180, 255)},
+    {"id":"case_spiral",    "name":"Spiral Blaze",     "desc":"Spinning spiral pattern",             "cost":0,"pattern":"case_spiral",    "preview":(255,  80, 160)},
+    {"id":"case_plasma",    "name":"Plasma Core",      "desc":"Crackling plasma surface",            "cost":0,"pattern":"case_plasma",    "preview":( 60, 220, 200)},
+    # ── Epic — moving patterns + orbiting projectiles ────────────────────────
+    {"id":"case_nova",      "name":"Nova Burst",       "desc":"Exploding star pattern with orbs",   "cost":0,"pattern":"case_nova",      "preview":(255, 200,  40)},
+    {"id":"case_vortex",    "name":"Vortex",           "desc":"Swirling dark vortex with shards",   "cost":0,"pattern":"case_vortex",    "preview":( 80,  40, 200)},
+    {"id":"case_aurora",    "name":"Aurora",           "desc":"Shimmering aurora with particles",    "cost":0,"pattern":"case_aurora",    "preview":( 40, 220, 160)},
+    # ── Legendary — pulsing orange with colour-cycling projectiles ───────────
+    {"id":"case_infernal",  "name":"Infernal Core",    "desc":"Pulsing orange core with prismatic orbiting projectiles that cycle through the full spectrum", "cost":0,"pattern":"case_infernal","preview":(255, 120,  20)},
+]
+CASE_COSMETIC_IDS = {c["id"] for c in CASE_COSMETICS}
+
+# Pool used for rolling — one entry per card slot, with rarity + weight
+# Weights: Common ~500, Uncommon ~280, Rare ~160, Epic ~50, Legendary ~10
+CASE_POOL = [
+    # Common
+    {"cosm_id":"case_red",      "rarity":RARITY_COMMON,    "weight":110},
+    {"cosm_id":"case_green",    "rarity":RARITY_COMMON,    "weight":110},
+    {"cosm_id":"case_purple",   "rarity":RARITY_COMMON,    "weight":100},
+    {"cosm_id":"case_orange",   "rarity":RARITY_COMMON,    "weight": 95},
+    {"cosm_id":"case_pink",     "rarity":RARITY_COMMON,    "weight": 85},
+    # Uncommon
+    {"cosm_id":"case_stripes",  "rarity":RARITY_UNCOMMON,  "weight":100},
+    {"cosm_id":"case_pulse",    "rarity":RARITY_UNCOMMON,  "weight": 95},
+    {"cosm_id":"case_checker",  "rarity":RARITY_UNCOMMON,  "weight": 85},
+    # Rare
+    {"cosm_id":"case_wave",     "rarity":RARITY_RARE,      "weight": 60},
+    {"cosm_id":"case_spiral",   "rarity":RARITY_RARE,      "weight": 55},
+    {"cosm_id":"case_plasma",   "rarity":RARITY_RARE,      "weight": 45},
+    # Epic
+    {"cosm_id":"case_nova",     "rarity":RARITY_EPIC,      "weight": 20},
+    {"cosm_id":"case_vortex",   "rarity":RARITY_EPIC,      "weight": 18},
+    {"cosm_id":"case_aurora",   "rarity":RARITY_EPIC,      "weight": 12},
+    # Legendary
+    {"cosm_id":"case_infernal", "rarity":RARITY_LEGENDARY, "weight": 10},
+]
+_CASE_TOTAL_WEIGHT = sum(e["weight"] for e in CASE_POOL)
+
+
+def roll_case():
+    """Weighted random pick from CASE_POOL. Returns the pool entry dict."""
+    r = random.randint(0, _CASE_TOTAL_WEIGHT - 1)
+    acc = 0
+    for entry in CASE_POOL:
+        acc += entry["weight"]
+        if r < acc:
+            return entry
+    return CASE_POOL[-1]
+
 # Add, remove, or edit tips freely — they cycle one at a time.
 MENU_TIPS = [
     "Bosses drop 1 Token when defeated — spend them in the Token Shop!",
@@ -1076,8 +1514,8 @@ ALL_PERKS = [
     {"key": "dmg_pct",    "label": "Damage",      "bonus": 0.08, "icon": "+",  "color": ORANGE,       "desc": "+8% bullet damage"},
     {"key": "defense",    "label": "Defense",     "bonus": 0.08, "icon": "D",  "color": BLUE,         "desc": "-8% damage taken"},
     {"key": "speed_pct",  "label": "Speed",       "bonus": 0.06, "icon": ">>", "color": CYAN,         "desc": "+6% move speed"},
-    {"key": "hp_regen",   "label": "Lifesteal",    "bonus": 0.1,  "icon": "+",  "color": GREEN,        "desc": "+0.1 HP per hit on enemy"},
-    {"key": "max_hp_pct", "label": "Vitality",    "bonus": 0.10, "icon": "H",  "color": RED,          "desc": "+10% max HP"},
+    {"key": "hp_regen",   "label": "Lifesteal",    "bonus": 0.1,  "icon": "+",  "color": RED,        "desc": "+0.1 HP per hit on enemy"},
+    {"key": "max_hp_pct", "label": "Vitality",    "bonus": 0.10, "icon": "H",  "color": GREEN,          "desc": "+10% max HP"},
     {"key": "gold_pct",   "label": "Greed",       "bonus": 0.15, "icon": "G",  "color": YELLOW,       "desc": "+15% gold drops"},
     {"key": "range_pct",  "label": "Range",       "bonus": 0.10, "icon": "~",  "color": PURPLE,       "desc": "+10% bullet range"},
     {"key": "fire_rate",  "label": "Fire Rate",   "bonus": 0.08, "icon": "*",  "color": (255,100,30), "desc": "+8% fire rate"},
@@ -1085,6 +1523,21 @@ ALL_PERKS = [
 ]
 
 # ── helpers ──────────────────────────────────────────────────────────────────
+
+def _hsv_to_rgb(h, s, v):
+    """Convert HSV (h=0-360, s=0-1, v=0-1) to an (r,g,b) tuple with 0-255 range."""
+    h = h % 360
+    c  = v * s
+    x  = c * (1 - abs((h / 60) % 2 - 1))
+    m  = v - c
+    if   h < 60:  r, g, b = c, x, 0
+    elif h < 120: r, g, b = x, c, 0
+    elif h < 180: r, g, b = 0, c, x
+    elif h < 240: r, g, b = 0, x, c
+    elif h < 300: r, g, b = x, 0, c
+    else:          r, g, b = c, 0, x
+    return (int((r + m) * 255), int((g + m) * 255), int((b + m) * 255))
+
 
 def lerp_color(c1, c2, t):
     return tuple(max(0, min(255, int(c1[i] + (c2[i] - c1[i]) * t))) for i in range(3))
@@ -1574,8 +2027,10 @@ class Player:
         self.corruption_waves_cleared = 0
         self.owned_cosmetics  = set(TOKENS.owned_cosmetics)
         self.active_cosmetic  = TOKENS.active_cosmetic
+        self.owned_titles     = set(TOKENS.owned_titles)
+        self.active_title     = TOKENS.active_title
         self._cosm_tick       = 0
-        TOKENS.sync_to_player(self)   # validates + syncs cosmetics now that COSMETICS is defined
+        TOKENS.sync_to_player(self)
         # Perks: dict of key -> total stacked bonus (float)
         self.perks          = {}   # e.g. {"dmg_pct": 0.16, "defense": 0.08}
         self.regen_timer    = 0    # counts up to 180 (3s at 60fps)
@@ -1969,6 +2424,16 @@ class Player:
                     px2 = sx + side * int(self.size * 0.82)
                     pygame.draw.circle(surf, (48, 55, 62), (px2, sy - 3), int(self.size * 0.38))
                     pygame.draw.circle(surf, (75, 85, 96), (px2, sy - 3), int(self.size * 0.38), 2)
+            elif pat == "true_legend":
+                # Keep rainbow orbit particles during hurt flash
+                orb_r = self.size + 18
+                for oi in range(8):
+                    ang_p  = (t * 0.07) + (math.pi * 2 / 8) * oi
+                    hue_p  = (t * 2 + oi * 45) % 360
+                    rc, gc2, bc2 = _hsv_to_rgb(hue_p, 1.0, 1.0)
+                    px2 = sx + int(math.cos(ang_p) * orb_r)
+                    py2 = sy + int(math.sin(ang_p) * orb_r)
+                    pygame.draw.circle(surf, (rc, gc2, bc2), (px2, py2), 4)
             pygame.draw.circle(surf, WHITE, (sx, sy), self.size)
         elif pat == "default":
             pygame.draw.circle(surf, CYAN, (sx, sy), self.size)
@@ -2351,6 +2816,219 @@ class Player:
             rim_col = lerp_color((78, 88, 100), (120, 138, 155), pulse)
             pygame.draw.circle(surf, rim_col, (sx, sy), self.size, 3)
 
+        elif pat == "true_legend":
+            # ── True Legend — rotating rainbow strips + orbiting particles ─────
+            # 5 diagonal rainbow strips that scroll across the body
+            NUM_STRIPS  = 5
+            STRIP_SPEED = 1.2   # pixels per frame
+            scroll_off  = (t * STRIP_SPEED) % (self.size * 2)   # wraps every full width
+
+            # Draw onto a temp surface then mask to the circle
+            body_size = self.size + 2
+            body_surf = pygame.Surface((body_size * 2, body_size * 2), pygame.SRCALPHA)
+            for si in range(NUM_STRIPS * 2):   # double-up so we fill across the circle
+                hue       = (t * 1.5 + si * (360 / NUM_STRIPS)) % 360
+                strip_col = _hsv_to_rgb(hue, 0.9, 1.0)
+                strip_w   = max(3, (body_size * 2) // NUM_STRIPS - 1)
+                x_pos     = int(si * strip_w - scroll_off) % (body_size * 2 + strip_w) - strip_w
+                # Diagonal strip: draw as a parallelogram using a polygon
+                pts = [
+                    (x_pos,           0),
+                    (x_pos + strip_w, 0),
+                    (x_pos + strip_w - body_size // 2, body_size * 2),
+                    (x_pos           - body_size // 2, body_size * 2),
+                ]
+                try:
+                    pygame.draw.polygon(body_surf, strip_col, pts)
+                except Exception:
+                    pass
+            # Clip to circle
+            mask_surf = pygame.Surface((body_size * 2, body_size * 2), pygame.SRCALPHA)
+            pygame.draw.circle(mask_surf, (255, 255, 255, 255), (body_size, body_size), self.size)
+            body_surf.blit(mask_surf, (0, 0), special_flags=pygame.BLEND_RGBA_MULT)
+            surf.blit(body_surf, (sx - body_size, sy - body_size))
+
+            # Bright white ring outline with rainbow shimmer
+            ring_hue = (t * 3) % 360
+            pygame.draw.circle(surf, _hsv_to_rgb(ring_hue, 0.6, 1.0), (sx, sy), self.size, 3)
+
+            # Orbiting rainbow particles (8 particles, two rings)
+            for ring_i, (orb_r, n_orbs, spd) in enumerate([(self.size + 14, 8, 0.07), (self.size + 24, 6, -0.05)]):
+                for oi in range(n_orbs):
+                    ang_p  = (t * spd) + (math.pi * 2 / n_orbs) * oi
+                    hue_p  = (t * 2 + ring_i * 60 + oi * (360 // n_orbs)) % 360
+                    rc, gc2, bc2 = _hsv_to_rgb(hue_p, 1.0, 1.0)
+                    px2 = sx + int(math.cos(ang_p) * orb_r)
+                    py2 = sy + int(math.sin(ang_p) * orb_r)
+                    pygame.draw.circle(surf, (rc, gc2, bc2), (px2, py2), 4 if ring_i == 0 else 3)
+                    # Small glow dot inside
+                    pygame.draw.circle(surf, WHITE, (px2, py2), 2)
+
+        # ── Case-exclusive cosmetics ──────────────────────────────────────────
+        elif pat in ("case_red","case_green","case_purple","case_orange","case_pink"):
+            col_map = {"case_red":(220,50,50),"case_green":(40,180,80),
+                       "case_purple":(160,60,220),"case_orange":(255,130,20),"case_pink":(255,100,180)}
+            c = col_map[pat]
+            pygame.draw.circle(surf, c, (sx, sy), self.size)
+            # Soft inner glow
+            pulse = math.sin(t * 0.06) * 0.3 + 0.7
+            pygame.draw.circle(surf, tuple(min(255,int(v*pulse)) for v in c), (sx,sy), int(self.size*0.55))
+
+        elif pat == "case_stripes":
+            # Rotating diagonal colour stripes
+            body_size = self.size + 1
+            bs = pygame.Surface((body_size*2, body_size*2), pygame.SRCALPHA)
+            for si in range(6):
+                hue = (t * 2 + si * 60) % 360
+                sc  = _hsv_to_rgb(hue, 0.8, 1.0)
+                sw2 = body_size * 2 // 6
+                xp  = int(si * sw2 - (t * 1.0) % (body_size * 2))
+                pts = [(xp,0),(xp+sw2,0),(xp+sw2-body_size//3,body_size*2),(xp-body_size//3,body_size*2)]
+                try: pygame.draw.polygon(bs, sc, pts)
+                except: pass
+            ms = pygame.Surface((body_size*2, body_size*2), pygame.SRCALPHA)
+            pygame.draw.circle(ms, (255,255,255,255), (body_size,body_size), self.size)
+            bs.blit(ms,(0,0),special_flags=pygame.BLEND_RGBA_MULT)
+            surf.blit(bs,(sx-body_size,sy-body_size))
+
+        elif pat == "case_pulse":
+            # Pulsing concentric rings
+            pygame.draw.circle(surf, (160,40,220),(sx,sy), self.size)
+            for ri in range(3):
+                phase = (t * 0.08 + ri * 0.33) % 1.0
+                r2 = int(self.size * phase)
+                alpha = max(0, int(200 * (1 - phase)))
+                if r2 > 0 and alpha > 0:
+                    rs = pygame.Surface((r2*2+2,r2*2+2), pygame.SRCALPHA)
+                    pygame.draw.circle(rs,(200,80,255,alpha),(r2+1,r2+1),r2,2)
+                    surf.blit(rs,(sx-r2-1,sy-r2-1))
+
+        elif pat == "case_checker":
+            # Animated chequered pattern clipped to circle
+            body_size = self.size + 1
+            bs = pygame.Surface((body_size*2, body_size*2), pygame.SRCALPHA)
+            cell = max(6, body_size//3)
+            shift = int(t * 0.8) % (cell * 2)
+            for gx in range(-cell, body_size*2 + cell, cell):
+                for gy in range(-cell, body_size*2 + cell, cell):
+                    rx = (gx + shift) // cell; ry = (gy + shift) // cell
+                    col2 = (200,180,40) if (rx+ry) % 2 == 0 else (60,50,10)
+                    pygame.draw.rect(bs, col2, (gx, gy, cell, cell))
+            ms = pygame.Surface((body_size*2,body_size*2),pygame.SRCALPHA)
+            pygame.draw.circle(ms,(255,255,255,255),(body_size,body_size),self.size)
+            bs.blit(ms,(0,0),special_flags=pygame.BLEND_RGBA_MULT)
+            surf.blit(bs,(sx-body_size,sy-body_size))
+
+        elif pat == "case_wave":
+            # Rippling wave bands
+            pygame.draw.circle(surf,(20,100,200),(sx,sy),self.size)
+            for wi in range(4):
+                phase = (t * 0.07 + wi * 0.25) % 1.0
+                r2 = int(self.size * 0.3 + self.size * 0.7 * phase)
+                alpha = max(0,int(220*(1-phase)))
+                if r2 > 0 and alpha > 0:
+                    rs = pygame.Surface((r2*2+2,r2*2+2),pygame.SRCALPHA)
+                    pygame.draw.circle(rs,(40,200,255,alpha),(r2+1,r2+1),r2,3)
+                    surf.blit(rs,(sx-r2-1,sy-r2-1))
+
+        elif pat == "case_spiral":
+            # Spinning spiral segments
+            pygame.draw.circle(surf,(180,20,100),(sx,sy),self.size)
+            for si in range(8):
+                ang = t * 0.09 + si * math.pi / 4
+                for rr in range(4,self.size,4):
+                    hue = (t * 3 + rr * 8 + si * 45) % 360
+                    sc = _hsv_to_rgb(hue,0.9,1.0)
+                    px2 = sx + int(math.cos(ang + rr * 0.12) * rr)
+                    py2 = sy + int(math.sin(ang + rr * 0.12) * rr)
+                    pygame.draw.circle(surf, sc, (px2,py2), 2)
+
+        elif pat == "case_plasma":
+            # Crackling plasma — grid of shimmering cells
+            pygame.draw.circle(surf,(20,160,140),(sx,sy),self.size)
+            cell = 7
+            for gx in range(sx-self.size, sx+self.size, cell):
+                for gy in range(sy-self.size, sy+self.size, cell):
+                    if math.hypot(gx+cell//2-sx, gy+cell//2-sy) < self.size - 2:
+                        seed = int(gx*31 + gy*17 + t*5) & 0xFF
+                        if seed > 200:
+                            ec = (60, 255, 220) if seed > 230 else (20,200,160)
+                            pygame.draw.rect(surf, ec, (gx,gy,cell-1,cell-1))
+
+        elif pat == "case_nova":
+            # Exploding star burst + orbiting gold orbs
+            pygame.draw.circle(surf,(200,160,20),(sx,sy),self.size)
+            for si in range(8):
+                ang = t * 0.06 + si * math.pi / 4
+                for rr in range(2, self.size, 4):
+                    flick = math.sin(t * 0.15 + si * 1.1 + rr * 0.3)
+                    if flick > 0.3:
+                        px2 = sx + int(math.cos(ang) * rr)
+                        py2 = sy + int(math.sin(ang) * rr)
+                        pygame.draw.circle(surf,(255,230,60),(px2,py2),2)
+            orb_r = self.size + 16
+            for oi in range(6):
+                oa = t * 0.08 + oi * math.pi / 3
+                pygame.draw.circle(surf,(255,200,40),(sx+int(math.cos(oa)*orb_r),sy+int(math.sin(oa)*orb_r)),5)
+                pygame.draw.circle(surf,WHITE,(sx+int(math.cos(oa)*orb_r),sy+int(math.sin(oa)*orb_r)),2)
+
+        elif pat == "case_vortex":
+            # Dark swirling vortex + shard projectiles
+            pygame.draw.circle(surf,(30,15,80),(sx,sy),self.size)
+            for ri in range(self.size, 2, -3):
+                ang = t * 0.10 + ri * 0.25
+                tc2 = lerp_color((30,15,80),(120,40,220), 1 - ri/self.size)
+                px2 = sx + int(math.cos(ang) * ri * 0.5)
+                py2 = sy + int(math.sin(ang) * ri * 0.5)
+                pygame.draw.circle(surf, tc2, (px2,py2), max(1,ri//5))
+            orb_r = self.size + 14
+            for oi in range(5):
+                oa = t * -0.09 + oi * math.pi * 2 / 5
+                pygame.draw.circle(surf,(160,60,255),(sx+int(math.cos(oa)*orb_r),sy+int(math.sin(oa)*orb_r)),4)
+
+        elif pat == "case_aurora":
+            # Shimmering aurora curtains + drifting particles
+            pygame.draw.circle(surf,(10,80,60),(sx,sy),self.size)
+            for bi in range(5):
+                hue = (t * 1.5 + bi * 30) % 120 + 120  # greens and cyans
+                bc  = _hsv_to_rgb(hue,0.8,1.0)
+                bx2 = sx - self.size + bi * (self.size*2//5)
+                wave = int(math.sin(t * 0.1 + bi * 1.2) * 5)
+                pygame.draw.line(surf,bc,(bx2,sy-self.size+wave),(bx2,sy+self.size+wave),3)
+            orb_r = self.size + 18
+            for oi in range(7):
+                oa = t * 0.05 + oi * math.pi * 2 / 7
+                hue = (t * 3 + oi * 51) % 120 + 100
+                oc = _hsv_to_rgb(hue, 0.7, 1.0)
+                pygame.draw.circle(surf, oc,(sx+int(math.cos(oa)*orb_r),sy+int(math.sin(oa)*orb_r)),4)
+
+        elif pat == "case_infernal":
+            # Pulsing orange body + colour-cycling projectiles (purple→pink→red→orange→yellow→blue→purple)
+            pulse = math.sin(t * 0.07) * 0.4 + 0.6
+            body_col = (int(255*pulse), int(100*pulse), int(10*pulse))
+            glow_col = (int(255*pulse), int(160*pulse), int(40*pulse))
+            pygame.draw.circle(surf, body_col, (sx,sy), self.size)
+            # Inner pulsing core
+            pygame.draw.circle(surf, glow_col, (sx,sy), int(self.size * 0.55))
+            # Outer pulsing ring
+            ring_alpha = int(180 * pulse)
+            rs = pygame.Surface((self.size*2+8,self.size*2+8),pygame.SRCALPHA)
+            pygame.draw.circle(rs,(*glow_col,ring_alpha),(self.size+4,self.size+4),self.size+2,4)
+            surf.blit(rs,(sx-self.size-4,sy-self.size-4))
+            # Colour-cycling orbiting projectiles — hue cycles through a specific path
+            # purple(270)→pink(320)→red(0)→orange(30)→yellow(60)→blue(220)→purple(270)
+            # We map this as hue = f(t) smoothly
+            hue_path = [270, 320, 360, 390, 420, 580, 630]  # extended degrees
+            hue_cycle = (t * 1.8) % (hue_path[-1] - hue_path[0])
+            raw_h = hue_path[0] + hue_cycle
+            proj_col = _hsv_to_rgb(raw_h % 360, 1.0, 1.0)
+            for oi in range(8):
+                oa = t * 0.09 + oi * math.pi / 4
+                orb_r = self.size + 20
+                px2 = sx + int(math.cos(oa)*orb_r); py2 = sy + int(math.sin(oa)*orb_r)
+                pygame.draw.circle(surf, proj_col, (px2,py2), 5)
+                pygame.draw.circle(surf, WHITE,    (px2,py2), 2)
+
         else:
             pygame.draw.circle(surf, CYAN, (sx, sy), self.size)
 
@@ -2363,17 +3041,36 @@ class Player:
         ey  = sy + int(math.sin(ang) * 8)
         pygame.draw.circle(surf, DARK, (ex, ey), 5)
 
-        # Username label above player
+        # Username label (and optional title) above player
         name_surf = font_small.render(self.username, True, CYAN)
         name_x    = sx - name_surf.get_width() // 2
         name_y    = sy - self.size - 22
         pad       = 4
-        bg_surf   = pygame.Surface(
-            (name_surf.get_width() + pad * 2, name_surf.get_height() + 2),
-            pygame.SRCALPHA)
-        bg_surf.fill((0, 0, 0, 140))
-        surf.blit(bg_surf, (name_x - pad, name_y - 2))
-        surf.blit(name_surf, (name_x, name_y))
+
+        # If player has an active title, draw it on a line above the username
+        title_obj = None
+        if self.active_title and self.active_title != "none":
+            title_obj = next((t for t in TITLES if t["id"] == self.active_title), None)
+
+        if title_obj:
+            title_surf = font_small.render(title_obj["name"], True, title_obj["col"])
+            title_x    = sx - title_surf.get_width() // 2
+            title_y    = name_y - title_surf.get_height() - 2
+            # Background covers both rows
+            total_h  = title_surf.get_height() + 2 + name_surf.get_height() + 2
+            total_w  = max(title_surf.get_width(), name_surf.get_width()) + pad * 2
+            bg_surf  = pygame.Surface((total_w, total_h), pygame.SRCALPHA)
+            bg_surf.fill((0, 0, 0, 140))
+            surf.blit(bg_surf, (sx - total_w // 2, title_y - 2))
+            surf.blit(title_surf, (title_x, title_y))
+            surf.blit(name_surf, (name_x, name_y))
+        else:
+            bg_surf = pygame.Surface(
+                (name_surf.get_width() + pad * 2, name_surf.get_height() + 2),
+                pygame.SRCALPHA)
+            bg_surf.fill((0, 0, 0, 140))
+            surf.blit(bg_surf, (name_x - pad, name_y - 2))
+            surf.blit(name_surf, (name_x, name_y))
 
         # Optional player health bar (shown when enabled in settings)
         if GAME_SETTINGS.player_health_bar:
@@ -4457,6 +5154,72 @@ def _draw_cosmetic_preview(surf, pattern, preview_col, cx, cy, r):
                                 cy + int(math.sin(a) * orb_r_in)), 1)
         # Steel rim
         pygame.draw.circle(surf, (95, 108, 120), (cx, cy), r, 2)
+    elif pattern == "true_legend":
+        # Rainbow-striped body + orbiting dots preview (static snapshot)
+        for si in range(5):
+            hue = (si * 72) % 360
+            col = _hsv_to_rgb(hue, 0.9, 1.0)
+            pygame.draw.arc(surf, col,
+                            (cx - r, cy - r, r * 2, r * 2),
+                            math.radians(si * 72), math.radians(si * 72 + 68), r)
+        pygame.draw.circle(surf, (255, 255, 255), (cx, cy), r // 2)
+        for oi in range(6):
+            a   = (math.pi * 2 / 6) * oi
+            hue = (oi * 60) % 360
+            pygame.draw.circle(surf, _hsv_to_rgb(hue, 1.0, 1.0),
+                               (cx + int(math.cos(a) * (r + 6)),
+                                cy + int(math.sin(a) * (r + 6))), 3)
+    elif pattern in ("case_red","case_green","case_purple","case_orange","case_pink"):
+        pygame.draw.circle(surf, preview_col, (cx, cy), r)
+        pygame.draw.circle(surf, tuple(min(255,v+60) for v in preview_col), (cx,cy), r//2)
+    elif pattern == "case_stripes":
+        for si in range(4):
+            hue = si * 90
+            sc = _hsv_to_rgb(hue, 0.8, 1.0)
+            sw2 = r * 2 // 4
+            pygame.draw.arc(surf, sc, (cx-r,cy-r,r*2,r*2), math.radians(si*90), math.radians(si*90+86), r)
+    elif pattern == "case_pulse":
+        pygame.draw.circle(surf, (160,40,220),(cx,cy),r)
+        for ri2 in range(1, 3):
+            pygame.draw.circle(surf, (200,80,255),(cx,cy), r*ri2//3, 2)
+    elif pattern == "case_checker":
+        for gx in range(0, r*2, r//2):
+            for gy in range(0, r*2, r//2):
+                col2 = (200,180,40) if (gx//( r//2)+gy//(r//2))%2==0 else (60,50,10)
+                pygame.draw.rect(surf, col2, (cx-r+gx,cy-r+gy, r//2, r//2))
+        pygame.draw.circle(surf, (0,0,0,0),(cx,cy),r)  # keep it readable
+    elif pattern == "case_wave":
+        pygame.draw.circle(surf,(20,100,200),(cx,cy),r)
+        for ri2 in range(1,3):
+            pygame.draw.circle(surf,(40,200,255),(cx,cy),r*ri2//3,2)
+    elif pattern == "case_spiral":
+        pygame.draw.circle(surf,(180,20,100),(cx,cy),r)
+        for si in range(6):
+            ang = si*math.pi/3
+            pygame.draw.line(surf,_hsv_to_rgb(si*60,0.9,1.0),(cx,cy),(cx+int(math.cos(ang)*r),cy+int(math.sin(ang)*r)),2)
+    elif pattern == "case_plasma":
+        pygame.draw.circle(surf,(20,160,140),(cx,cy),r)
+        pygame.draw.circle(surf,(60,255,220),(cx,cy),r//2,2)
+    elif pattern == "case_nova":
+        pygame.draw.circle(surf,(200,160,20),(cx,cy),r)
+        for si in range(8):
+            ang=si*math.pi/4
+            pygame.draw.line(surf,(255,230,60),(cx,cy),(cx+int(math.cos(ang)*r),cy+int(math.sin(ang)*r)),2)
+    elif pattern == "case_vortex":
+        pygame.draw.circle(surf,(30,15,80),(cx,cy),r)
+        pygame.draw.circle(surf,(120,40,220),(cx,cy),r//2,2)
+        pygame.draw.circle(surf,(160,60,255),(cx,cy),r//4)
+    elif pattern == "case_aurora":
+        pygame.draw.circle(surf,(10,80,60),(cx,cy),r)
+        for bi in range(4):
+            hue=120+bi*15
+            pygame.draw.line(surf,_hsv_to_rgb(hue,0.8,1.0),(cx-r+bi*(r//2),cy-r),(cx-r+bi*(r//2),cy+r),3)
+    elif pattern == "case_infernal":
+        pygame.draw.circle(surf,(255,100,10),(cx,cy),r)
+        pygame.draw.circle(surf,(255,200,60),(cx,cy),r//2)
+        for oi in range(5):
+            ang=oi*math.pi*2/5
+            pygame.draw.circle(surf,(255,120,20),(cx+int(math.cos(ang)*(r+6)),cy+int(math.sin(ang)*(r+6))),3)
     pygame.draw.circle(surf, WHITE, (cx, cy), r, 1)
 
 
@@ -4464,22 +5227,25 @@ def _draw_cosmetic_preview(surf, pattern, preview_col, cx, cy, r):
 
 class Shop:
     PAGE_WEAPONS  = 0
-    PAGE_TOKENS   = 1
+    PAGE_COSMETICS = 1
+    PAGE_TITLES    = 2
 
     def __init__(self):
-        self.open      = False
-        self.selected  = 0
-        self.page      = self.PAGE_WEAPONS
-        self.cosm_page = 0   # which page of cosmetics is shown (4 per page)
-        self.weap_page = 0   # which page of weapons is shown (7 per page)
+        self.open       = False
+        self.selected   = 0
+        self.page       = self.PAGE_WEAPONS
+        self.cosm_page  = 0
+        self.weap_page  = 0
+        self.title_page = 0
 
     def toggle(self):
         self.open = not self.open
         if self.open:
-            self.page      = self.PAGE_WEAPONS
-            self.selected  = 0
-            self.cosm_page = 0
-            self.weap_page = 0
+            self.page       = self.PAGE_WEAPONS
+            self.selected   = 0
+            self.cosm_page  = 0
+            self.weap_page  = 0
+            self.title_page = 0
 
     def draw(self, surf, player, fonts):
         if not self.open:
@@ -4492,22 +5258,23 @@ class Shop:
         pygame.draw.rect(surf, PANEL, (px, py, pw, ph), border_radius=12)
         pygame.draw.rect(surf, CYAN,  (px, py, pw, ph), 2,  border_radius=12)
 
-        # ── Tab headers (2 tabs) ──────────────────────────────────────────────
-        tab_w2 = pw // 2
+        # ── Tab headers (3 tabs) ──────────────────────────────────────────────
+        tab_w3 = pw // 3
         for ti, (tlabel, tcol, tpage) in enumerate([
-            ("Weapons",     CYAN,           self.PAGE_WEAPONS),
-            ("Token Shop",  (255, 200, 60), self.PAGE_TOKENS),
+            ("Weapons",          CYAN,            self.PAGE_WEAPONS),
+            ("Cosmetics Shop",   (255, 200, 60),  self.PAGE_COSMETICS),
+            ("Title Shop",       (180, 120, 255), self.PAGE_TITLES),
         ]):
-            tx     = px + ti * tab_w2
+            tx     = px + ti * tab_w3
             active = (tpage == self.page)
             tab_bg = lerp_color(PANEL, tcol, 0.18 if active else 0.04)
-            pygame.draw.rect(surf, tab_bg, (tx, py, tab_w2, 48),
-                             border_radius=10 if ti == 0 else 0)
+            br_l   = 10 if ti == 0 else 0
+            br_r   = 10 if ti == 2 else 0
+            pygame.draw.rect(surf, tab_bg, (tx, py, tab_w3, 48), border_radius=br_l)
             pygame.draw.rect(surf, tcol if active else GRAY,
-                             (tx, py, tab_w2, 48), 2 if active else 1,
-                             border_radius=10 if ti == 0 else 0)
+                             (tx, py, tab_w3, 48), 2 if active else 1, border_radius=br_l)
             ts = fonts["small"].render(tlabel, True, tcol if active else GRAY)
-            label_x = tx + tab_w2 // 2 - ts.get_width() // 2
+            label_x = tx + tab_w3 // 2 - ts.get_width() // 2
             surf.blit(ts, (label_x, py + 16))
             icon_cx = label_x - 14; icon_cy = py + 24
             if ti == 0:
@@ -4515,8 +5282,16 @@ class Shop:
                 pygame.draw.line(surf, sword_col, (icon_cx, icon_cy - 8), (icon_cx, icon_cy + 8), 2)
                 pygame.draw.line(surf, sword_col, (icon_cx - 5, icon_cy - 2), (icon_cx + 5, icon_cy - 2), 2)
                 pygame.draw.circle(surf, sword_col, (icon_cx, icon_cy + 8), 3)
-            else:
+            elif ti == 1:
                 draw_token_coin(surf, icon_cx, icon_cy, 7 if active else 6)
+            else:
+                # Crown icon for title shop
+                tc2 = tcol if active else GRAY
+                pts = [(icon_cx - 7, icon_cy + 5), (icon_cx - 7, icon_cy - 2),
+                       (icon_cx - 3, icon_cy + 2), (icon_cx, icon_cy - 5),
+                       (icon_cx + 3, icon_cy + 2), (icon_cx + 7, icon_cy - 2),
+                       (icon_cx + 7, icon_cy + 5)]
+                pygame.draw.lines(surf, tc2, False, pts, 2)
 
         # Divider below tabs
         pygame.draw.line(surf, CYAN, (px, py + 48), (px + pw, py + 48), 1)
@@ -4530,8 +5305,10 @@ class Shop:
 
         if self.page == self.PAGE_WEAPONS:
             self._draw_weapons(surf, player, fonts, px, py, pw, ph)
-        else:
+        elif self.page == self.PAGE_COSMETICS:
             self._draw_tokens(surf, player, fonts, px, py, pw, ph)
+        else:
+            self._draw_titles(surf, player, fonts, px, py, pw, ph)
 
     def _draw_weapons(self, surf, player, fonts, px, py, pw, ph):
         COR_COL   = (180, 0, 220)
@@ -4659,7 +5436,7 @@ class Shop:
         self._heal_rect = pygame.Rect(px + 16, heal_row_y, pw - 32, 34)
 
         hint = fonts["small"].render(
-            "UP/DOWN select  |  ◄/► page  |  [B] buy  |  [E] equip  |  [H] heal  |  [TAB] close",
+            "[Q]Weapons [R]Cosmetics [T]Titles  |  UP/DOWN  |  ◄/► page  |  [B]buy [E]equip [H]heal  |  [TAB]close",
             True, GRAY)
         surf.blit(hint, (px + pw // 2 - hint.get_width() // 2, py + ph - 28))
 
@@ -4722,12 +5499,18 @@ class Shop:
                       (px + 84, row_y + 36))
 
             # Right-side status
+            is_ach_reward = bool(cosm.get("achievement_unlock"))
             if equipped:
                 surf.blit(fonts["small"].render("Equipped", True, (80, 220, 80)),
                           (px + pw - 130, row_y + 24))
             elif owned:
                 surf.blit(fonts["small"].render("[E] Equip", True, CYAN),
                           (px + pw - 130, row_y + 24))
+            elif is_ach_reward:
+                surf.blit(fonts["small"].render("Achievement", True, (180, 120, 255)),
+                          (px + pw - 150, row_y + 14))
+                surf.blit(fonts["tiny"].render("reward only", True, (120, 80, 180)),
+                          (px + pw - 150, row_y + 34))
             else:
                 cost_col = (255, 200, 60) if (can_buy and meets_kills) else (100, 80, 40)
                 draw_token_coin(surf, px + pw - 122, row_y + 18, 7)
@@ -4783,96 +5566,211 @@ class Shop:
         surf.blit(bal_s, (px + pw // 2 - bal_s.get_width() // 2, bal_y + 9))
 
         hint = fonts["small"].render(
-            "UP/DOWN select  |  ◄/► page  |  [B] buy  |  [E] equip  |  [TAB] close", True, GRAY)
+            "[Q]Weapons [R]Cosmetics [T]Titles  |  UP/DOWN  |  ◄/► page  |  [B]buy [E]equip  |  [TAB]close", True, GRAY)
         surf.blit(hint, (px + pw // 2 - hint.get_width() // 2, py + ph - 28))
+
+    def _draw_titles(self, surf, player, fonts, px, py, pw, ph):
+        TIT_COL   = (180, 120, 255)
+        ITEMS_PER = 6
+        content_y = py + 80
+        items     = TITLES
+        total_pages = max(1, math.ceil(len(items) / ITEMS_PER))
+        self.title_page = max(0, min(self.title_page, total_pages - 1))
+        page_items = items[self.title_page * ITEMS_PER : (self.title_page + 1) * ITEMS_PER]
+
+        self._title_rects = {}
+        row_h  = 72; row_gap = 8
+        for slot, title in enumerate(page_items):
+            global_i = self.title_page * ITEMS_PER + slot
+            ry       = content_y + slot * (row_h + row_gap)
+            rr       = pygame.Rect(px + 20, ry, pw - 40, row_h)
+            self._title_rects[slot] = (rr, title["id"])
+
+            owned    = title["id"] in player.owned_titles
+            equipped = title["id"] == player.active_title
+            tc       = title["col"]
+            hov      = rr.collidepoint(pygame.mouse.get_pos())
+            sel      = (global_i == self.selected)
+
+            bg = lerp_color(PANEL, tc, 0.28 if (sel or hov) else (0.14 if owned else 0.05))
+            pygame.draw.rect(surf, bg, rr, border_radius=10)
+            pygame.draw.rect(surf, tc if (sel or hov) else (GRAY if not owned else tc),
+                             rr, 2 if (sel or equipped) else 1, border_radius=10)
+
+            # Crown icon
+            cx2 = rr.x + 30; cy2 = rr.centery
+            crown_pts = [(cx2 - 10, cy2 + 7), (cx2 - 10, cy2 - 2),
+                         (cx2 - 4,  cy2 + 4),  (cx2,      cy2 - 8),
+                         (cx2 + 4,  cy2 + 4),  (cx2 + 10, cy2 - 2),
+                         (cx2 + 10, cy2 + 7)]
+            pygame.draw.lines(surf, tc if owned else GRAY, False, crown_pts, 2)
+            pygame.draw.line(surf, tc if owned else GRAY,
+                             (cx2 - 10, cy2 + 7), (cx2 + 10, cy2 + 7), 2)
+
+            name_col = WHITE if owned else (90, 90, 100)
+            nm = fonts["med"].render(title["name"], True, name_col)
+            surf.blit(nm, (rr.x + 56, ry + 10))
+
+            desc_col = GRAY if owned else (60, 60, 70)
+            ds = fonts["small"].render(title["desc"], True, desc_col)
+            surf.blit(ds, (rr.x + 56, ry + 34))
+
+            # Cost / status
+            if equipped:
+                eq_s = fonts["small"].render("Equipped", True, TIT_COL)
+                surf.blit(eq_s, (rr.right - eq_s.get_width() - 16, ry + 25))
+            elif owned:
+                eq_s = fonts["small"].render("Owned", True, (100, 200, 100))
+                surf.blit(eq_s, (rr.right - eq_s.get_width() - 16, ry + 25))
+            elif title["cost"] == 0:
+                fr_s = fonts["small"].render("Free", True, GREEN)
+                surf.blit(fr_s, (rr.right - fr_s.get_width() - 16, ry + 25))
+            else:
+                draw_token_coin(surf, rr.right - 50, ry + row_h // 2, 7)
+                cost_s = fonts["small"].render(str(title["cost"]), True,
+                                               (255, 200, 60) if TOKENS.total >= title["cost"] else RED)
+                surf.blit(cost_s, (rr.right - 35, ry + row_h // 2 - cost_s.get_height() // 2))
+
+        # Pagination
+        if total_pages > 1:
+            nav_y = py + ph - 68
+            self._title_prev_rect = pygame.Rect(px + 20, nav_y, 120, 32)
+            self._title_next_rect = pygame.Rect(px + pw - 140, nav_y, 120, 32)
+            for rrect, label, enabled in [
+                (self._title_prev_rect, "◄ Prev", self.title_page > 0),
+                (self._title_next_rect, "Next ►", self.title_page < total_pages - 1),
+            ]:
+                col2 = TIT_COL if enabled else GRAY
+                pygame.draw.rect(surf, lerp_color(PANEL, col2, 0.15), rrect, border_radius=8)
+                pygame.draw.rect(surf, col2, rrect, 1, border_radius=8)
+                ls = fonts["small"].render(label, True, col2)
+                surf.blit(ls, (rrect.centerx - ls.get_width() // 2,
+                               rrect.centery - ls.get_height() // 2))
+            pg_s = fonts["small"].render(f"{self.title_page + 1}/{total_pages}", True, GRAY)
+            surf.blit(pg_s, (px + pw // 2 - pg_s.get_width() // 2, nav_y + 8))
+        else:
+            self._title_prev_rect = pygame.Rect(0, 0, 1, 1)
+            self._title_next_rect = pygame.Rect(0, 0, 1, 1)
+
+        bal_y = py + ph - 28
+        hint  = fonts["small"].render(
+            "UP/DOWN select  |  [B] buy  |  [E] equip  |  [TAB] close", True, GRAY)
+        surf.blit(hint, (px + pw // 2 - hint.get_width() // 2, bal_y))
 
     def handle_key(self, key, player, floating_texts):
         if not self.open:
             return
-        # Tab switching — Q for Weapons, T for Token Shop
+        # Tab switching
         if key == pygame.K_q:
-            self.page = self.PAGE_WEAPONS
-            return
+            self.page = self.PAGE_WEAPONS;   self.selected = 0; return
+        if key == pygame.K_r:
+            self.page = self.PAGE_COSMETICS; self.selected = 0; return
+        if key == pygame.K_t:
+            self.page = self.PAGE_TITLES;    self.selected = 0; return
 
-        if self.page == self.PAGE_TOKENS:
+        # ── Cosmetics page ────────────────────────────────────────────────────
+        if self.page == self.PAGE_COSMETICS:
             ITEMS_PER   = 4
             items       = list(COSMETICS)
             total_pages = max(1, math.ceil(len(items) / ITEMS_PER))
             if self.selected >= len(items) or self.selected < 0:
                 self.selected = 0
             if key == pygame.K_UP:
-                self.selected = (self.selected - 1) % len(items)
-                self.cosm_page = self.selected // ITEMS_PER
-                return
+                self.selected  = (self.selected - 1) % len(items)
+                self.cosm_page = self.selected // ITEMS_PER; return
             if key == pygame.K_DOWN:
-                self.selected = (self.selected + 1) % len(items)
-                self.cosm_page = self.selected // ITEMS_PER
-                return
+                self.selected  = (self.selected + 1) % len(items)
+                self.cosm_page = self.selected // ITEMS_PER; return
             if key == pygame.K_LEFT:
                 self.cosm_page = max(0, self.cosm_page - 1)
-                self.selected  = self.cosm_page * ITEMS_PER
-                return
+                self.selected  = self.cosm_page * ITEMS_PER; return
             if key == pygame.K_RIGHT:
                 self.cosm_page = min(total_pages - 1, self.cosm_page + 1)
-                self.selected  = self.cosm_page * ITEMS_PER
-                return
+                self.selected  = self.cosm_page * ITEMS_PER; return
             cosm  = items[self.selected]
             owned = cosm["id"] in player.owned_cosmetics
+            is_ach_reward = bool(cosm.get("achievement_unlock"))
             meets_kills = (TOKENS.seraphix_kills >= cosm.get("req_seraphix_kills", 0) and
                            TOKENS.nyxoth_kills   >= cosm.get("req_nyxoth_kills", 0)   and
                            TOKENS.vexara_kills   >= cosm.get("req_vexara_kills", 0)   and
                            TOKENS.malachar_kills >= cosm.get("req_malachar_kills", 0) and
                            TOKENS.gorvak_kills   >= cosm.get("req_gorvak_kills", 0))
-            if key == pygame.K_b and not owned and meets_kills and TOKENS.spend(cosm["cost"]):
+            if key == pygame.K_b and not owned and not is_ach_reward and meets_kills and TOKENS.spend(cosm["cost"]):
                 player.owned_cosmetics.add(cosm["id"])
                 player.active_cosmetic = cosm["id"]
-                TOKENS.unlock_cosmetic(cosm["id"])
-                TOKENS.equip_cosmetic(cosm["id"])
-                floating_texts.append(
-                    FloatingText(player.x, player.y - 30,
-                                 f"Unlocked {cosm['name']}!", (255, 200, 60), 20))
+                TOKENS.unlock_cosmetic(cosm["id"]); TOKENS.equip_cosmetic(cosm["id"])
+                floating_texts.append(FloatingText(player.x, player.y - 30,
+                                                    f"Unlocked {cosm['name']}!", (255, 200, 60), 20))
+                self._trigger_ach_check(floating_texts)
             elif key == pygame.K_e and owned:
                 player.active_cosmetic = cosm["id"]
                 TOKENS.equip_cosmetic(cosm["id"])
-                floating_texts.append(
-                    FloatingText(player.x, player.y - 30,
-                                 f"Equipped {cosm['name']}!", CYAN, 20))
+                floating_texts.append(FloatingText(player.x, player.y - 30,
+                                                    f"Equipped {cosm['name']}!", CYAN, 20))
             return
 
-        # Unified weapons page
+        # ── Titles page ───────────────────────────────────────────────────────
+        if self.page == self.PAGE_TITLES:
+            items       = TITLES
+            ITEMS_PER   = 6
+            total_pages = max(1, math.ceil(len(items) / ITEMS_PER))
+            if self.selected >= len(items) or self.selected < 0:
+                self.selected = 0
+            if key == pygame.K_UP:
+                self.selected   = (self.selected - 1) % len(items)
+                self.title_page = self.selected // ITEMS_PER; return
+            if key == pygame.K_DOWN:
+                self.selected   = (self.selected + 1) % len(items)
+                self.title_page = self.selected // ITEMS_PER; return
+            if key == pygame.K_LEFT:
+                self.title_page = max(0, self.title_page - 1)
+                self.selected   = self.title_page * ITEMS_PER; return
+            if key == pygame.K_RIGHT:
+                self.title_page = min(total_pages - 1, self.title_page + 1)
+                self.selected   = self.title_page * ITEMS_PER; return
+            title = items[self.selected]
+            owned = title["id"] in player.owned_titles
+            if key == pygame.K_b and not owned and title["cost"] == 0:
+                player.owned_titles.add(title["id"])
+                TOKENS.unlock_title(title["id"])
+                floating_texts.append(FloatingText(player.x, player.y - 30,
+                                                    f"Unlocked: {title['name']}!", (180, 120, 255), 20))
+            elif key == pygame.K_b and not owned and TOKENS.spend(title["cost"]):
+                player.owned_titles.add(title["id"])
+                TOKENS.unlock_title(title["id"])
+                floating_texts.append(FloatingText(player.x, player.y - 30,
+                                                    f"Unlocked: {title['name']}!", (180, 120, 255), 20))
+            elif key == pygame.K_e and owned:
+                player.active_title = title["id"]
+                TOKENS.equip_title(title["id"])
+                lbl = "(No Title)" if title["id"] == "none" else title["name"]
+                floating_texts.append(FloatingText(player.x, player.y - 30,
+                                                    f"Title: {lbl}", (180, 120, 255), 20))
+            return
+
+        # ── Weapons page ──────────────────────────────────────────────────────
         ITEMS_PER   = 7
         all_weapons = [(i, w, False) for i, w in enumerate(WEAPONS)]
         all_weapons += [(1000 + i, w, True) for i, w in enumerate(SPECIAL_WEAPONS)]
         total_pages = max(1, math.ceil(len(all_weapons) / ITEMS_PER))
-
-        # Normalise selected to a valid index in all_weapons
         all_idxs = [widx for widx, _, _ in all_weapons]
         if self.selected not in all_idxs:
             self.selected = 0
         cur_pos = all_idxs.index(self.selected)
-
         if key == pygame.K_UP:
             cur_pos = (cur_pos - 1) % len(all_weapons)
-            self.selected  = all_idxs[cur_pos]
-            self.weap_page = cur_pos // ITEMS_PER
-            return
+            self.selected  = all_idxs[cur_pos]; self.weap_page = cur_pos // ITEMS_PER; return
         if key == pygame.K_DOWN:
             cur_pos = (cur_pos + 1) % len(all_weapons)
-            self.selected  = all_idxs[cur_pos]
-            self.weap_page = cur_pos // ITEMS_PER
-            return
+            self.selected  = all_idxs[cur_pos]; self.weap_page = cur_pos // ITEMS_PER; return
         if key == pygame.K_LEFT:
             self.weap_page = max(0, self.weap_page - 1)
-            self.selected  = all_idxs[self.weap_page * ITEMS_PER]
-            return
+            self.selected  = all_idxs[self.weap_page * ITEMS_PER]; return
         if key == pygame.K_RIGHT:
             self.weap_page = min(total_pages - 1, self.weap_page + 1)
-            self.selected  = all_idxs[self.weap_page * ITEMS_PER]
-            return
+            self.selected  = all_idxs[self.weap_page * ITEMS_PER]; return
         if key == pygame.K_h:
-            self._do_heal(player, floating_texts)
-            return
-
+            self._do_heal(player, floating_texts); return
         widx, w, is_special = all_weapons[cur_pos]
         owned      = widx in player.owned_weapons
         equipped   = widx == player.weapon_idx
@@ -4880,19 +5778,14 @@ class Shop:
         can_afford = player.gold >= w["cost"]
         cwc2       = getattr(player, "corruption_waves_cleared", 0)
         unlocked   = cwc2 >= w.get("unlock_value", 0) if is_special else True
-
         if key == pygame.K_b and not owned and meets_lvl and unlocked and can_afford:
-            player.gold -= w["cost"]
-            player.owned_weapons.append(widx)
-            player.weapon_idx = widx
-            floating_texts.append(FloatingText(
-                player.x, player.y - 30, f"Bought {w['name']}!",
-                (255, 80, 220) if is_special else YELLOW, 20))
+            player.gold -= w["cost"]; player.owned_weapons.append(widx); player.weapon_idx = widx
+            floating_texts.append(FloatingText(player.x, player.y - 30, f"Bought {w['name']}!",
+                                               (255, 80, 220) if is_special else YELLOW, 20))
         elif key == pygame.K_e and owned and not equipped and meets_lvl:
             player.weapon_idx = widx
-            floating_texts.append(FloatingText(
-                player.x, player.y - 30, f"Equipped {w['name']}!",
-                (180, 80, 255) if is_special else CYAN, 20))
+            floating_texts.append(FloatingText(player.x, player.y - 30, f"Equipped {w['name']}!",
+                                               (180, 80, 255) if is_special else CYAN, 20))
 
     def handle_click(self, pos, player, floating_texts):
         """Call this when a mouse click occurs while the shop is open."""
@@ -4900,35 +5793,28 @@ class Shop:
             return
         pw, ph = 700, 680
         px = SW // 2 - pw // 2; py = SH // 2 - ph // 2
-        tab_w2 = pw // 2
+        tab_w3 = pw // 3
         # Tab header clicks
         if py <= pos[1] <= py + 48:
-            if px <= pos[0] <= px + tab_w2:
-                self.page = self.PAGE_WEAPONS
-                self.selected = 0
-            elif px + tab_w2 <= pos[0] <= px + pw:
-                self.page = self.PAGE_TOKENS
-                self.selected = 0
+            if px <= pos[0] < px + tab_w3:
+                self.page = self.PAGE_WEAPONS;   self.selected = 0
+            elif px + tab_w3 <= pos[0] < px + tab_w3 * 2:
+                self.page = self.PAGE_COSMETICS; self.selected = 0
+            elif px + tab_w3 * 2 <= pos[0] <= px + pw:
+                self.page = self.PAGE_TITLES;    self.selected = 0
             return
+
         if self.page == self.PAGE_WEAPONS:
-            # Heal button
             if hasattr(self, "_heal_rect") and self._heal_rect.collidepoint(pos):
-                self._do_heal(player, floating_texts)
-                return
-            # Prev / Next page buttons
+                self._do_heal(player, floating_texts); return
             if getattr(self, "_weap_prev_rect", None) and self._weap_prev_rect.collidepoint(pos):
                 self.weap_page = max(0, self.weap_page - 1)
-                ITEMS_PER = 7
-                all_idxs = [i for i in range(len(WEAPONS))] + [1000 + i for i in range(len(SPECIAL_WEAPONS))]
-                self.selected = all_idxs[self.weap_page * ITEMS_PER]
-                return
+                all_idxs = list(range(len(WEAPONS))) + [1000 + i for i in range(len(SPECIAL_WEAPONS))]
+                self.selected = all_idxs[self.weap_page * 7]; return
             if getattr(self, "_weap_next_rect", None) and self._weap_next_rect.collidepoint(pos):
                 self.weap_page += 1
-                ITEMS_PER = 7
-                all_idxs = [i for i in range(len(WEAPONS))] + [1000 + i for i in range(len(SPECIAL_WEAPONS))]
-                self.selected = all_idxs[self.weap_page * ITEMS_PER]
-                return
-            # Weapon row clicks
+                all_idxs = list(range(len(WEAPONS))) + [1000 + i for i in range(len(SPECIAL_WEAPONS))]
+                self.selected = all_idxs[min(self.weap_page * 7, len(all_idxs) - 1)]; return
             for slot, (rect, widx, w, is_special, owned, equipped) in getattr(self, "_weap_rects", {}).items():
                 if rect.collidepoint(pos):
                     self.selected = widx
@@ -4937,54 +5823,76 @@ class Shop:
                     cwc        = getattr(player, "corruption_waves_cleared", 0)
                     unlocked   = cwc >= w.get("unlock_value", 0) if is_special else True
                     if not owned and meets_lvl and unlocked and can_afford:
-                        player.gold -= w["cost"]
-                        player.owned_weapons.append(widx)
-                        player.weapon_idx = widx
-                        floating_texts.append(FloatingText(
-                            player.x, player.y - 30, f"Bought {w['name']}!",
-                            (255, 80, 220) if is_special else YELLOW, 20))
+                        player.gold -= w["cost"]; player.owned_weapons.append(widx); player.weapon_idx = widx
+                        floating_texts.append(FloatingText(player.x, player.y - 30, f"Bought {w['name']}!",
+                                                           (255, 80, 220) if is_special else YELLOW, 20))
                     elif owned and not equipped and meets_lvl:
                         player.weapon_idx = widx
-                        floating_texts.append(FloatingText(
-                            player.x, player.y - 30, f"Equipped {w['name']}!",
-                            (180, 80, 255) if is_special else CYAN, 20))
+                        floating_texts.append(FloatingText(player.x, player.y - 30, f"Equipped {w['name']}!",
+                                                           (180, 80, 255) if is_special else CYAN, 20))
                     break
-        elif self.page == self.PAGE_TOKENS:
-            # Prev / Next page buttons
+
+        elif self.page == self.PAGE_COSMETICS:
             if getattr(self, "_cosm_prev_rect", None) and self._cosm_prev_rect.collidepoint(pos):
-                self.cosm_page = max(0, self.cosm_page - 1)
-                self.selected  = self.cosm_page * 4
-                return
+                self.cosm_page = max(0, self.cosm_page - 1); self.selected = self.cosm_page * 4; return
             if getattr(self, "_cosm_next_rect", None) and self._cosm_next_rect.collidepoint(pos):
-                self.cosm_page += 1
-                self.selected   = self.cosm_page * 4
-                return
+                self.cosm_page += 1; self.selected = self.cosm_page * 4; return
             for slot, (rect, cosm_id, owned, equipped) in getattr(self, "_cosm_rects", {}).items():
                 if rect.collidepoint(pos):
-                    global_i = self.cosm_page * 4 + slot
-                    self.selected = global_i
+                    self.selected = self.cosm_page * 4 + slot
                     cosm = next((c for c in COSMETICS if c["id"] == cosm_id), None)
+                    is_ach_reward = bool(cosm and cosm.get("achievement_unlock"))
                     meets_kills = (cosm and
                                    TOKENS.seraphix_kills >= cosm.get("req_seraphix_kills", 0) and
                                    TOKENS.nyxoth_kills   >= cosm.get("req_nyxoth_kills", 0)   and
                                    TOKENS.vexara_kills   >= cosm.get("req_vexara_kills", 0)   and
                                    TOKENS.malachar_kills >= cosm.get("req_malachar_kills", 0) and
                                    TOKENS.gorvak_kills   >= cosm.get("req_gorvak_kills", 0))
-                    if cosm and not owned and meets_kills and TOKENS.spend(cosm["cost"]):
-                        player.owned_cosmetics.add(cosm_id)
-                        player.active_cosmetic = cosm_id
-                        TOKENS.unlock_cosmetic(cosm_id)
-                        TOKENS.equip_cosmetic(cosm_id)
-                        floating_texts.append(
-                            FloatingText(player.x, player.y - 30,
-                                         f"Unlocked {cosm['name']}!", (255, 200, 60), 20))
+                    if cosm and not owned and not is_ach_reward and meets_kills and TOKENS.spend(cosm["cost"]):
+                        player.owned_cosmetics.add(cosm_id); player.active_cosmetic = cosm_id
+                        TOKENS.unlock_cosmetic(cosm_id); TOKENS.equip_cosmetic(cosm_id)
+                        floating_texts.append(FloatingText(player.x, player.y - 30,
+                                                           f"Unlocked {cosm['name']}!", (255, 200, 60), 20))
+                        self._trigger_ach_check(floating_texts)
                     elif owned and not equipped:
-                        player.active_cosmetic = cosm_id
-                        TOKENS.equip_cosmetic(cosm_id)
-                        floating_texts.append(
-                            FloatingText(player.x, player.y - 30,
-                                         f"Equipped {cosm['name']}!", CYAN, 20))
+                        player.active_cosmetic = cosm_id; TOKENS.equip_cosmetic(cosm_id)
+                        floating_texts.append(FloatingText(player.x, player.y - 30,
+                                                           f"Equipped {cosm['name']}!", CYAN, 20))
                     break
+
+        elif self.page == self.PAGE_TITLES:
+            if getattr(self, "_title_prev_rect", None) and self._title_prev_rect.collidepoint(pos):
+                self.title_page = max(0, self.title_page - 1); self.selected = self.title_page * 6; return
+            if getattr(self, "_title_next_rect", None) and self._title_next_rect.collidepoint(pos):
+                self.title_page += 1; self.selected = self.title_page * 6; return
+            for slot, (rect, title_id) in getattr(self, "_title_rects", {}).items():
+                if rect.collidepoint(pos):
+                    self.selected = self.title_page * 6 + slot
+                    title = next((t for t in TITLES if t["id"] == title_id), None)
+                    if not title:
+                        break
+                    owned = title_id in player.owned_titles
+                    if not owned:
+                        can_buy = (title["cost"] == 0) or TOKENS.spend(title["cost"])
+                        if can_buy:
+                            player.owned_titles.add(title_id); TOKENS.unlock_title(title_id)
+                            floating_texts.append(FloatingText(player.x, player.y - 30,
+                                                               f"Unlocked: {title['name']}!", (180, 120, 255), 20))
+                    else:
+                        player.active_title = title_id; TOKENS.equip_title(title_id)
+                        lbl = "(No Title)" if title_id == "none" else title["name"]
+                        floating_texts.append(FloatingText(player.x, player.y - 30,
+                                                           f"Title: {lbl}", (180, 120, 255), 20))
+                    break
+
+    def _trigger_ach_check(self, floating_texts):
+        """Fire achievement checks from the shop context using the live game if available."""
+        import __main__
+        game = getattr(__main__, "_live_game", None)
+        if game is None:
+            return
+        new_ids = PROFILE.check_achievements(game)
+        game._queue_achievement_toasts(new_ids)
 
     def _do_heal(self, player, floating_texts):
         if player.gold >= 250 and player.hp < player.max_hp:
@@ -5450,7 +6358,7 @@ def save_checkpoint(game, slot):
     p = game.player
     data = {
         "slot":                       slot,
-        "username":                   p.username,
+        "username":                   PROFILE.username or p.username,
         "wave":                       game.wave,
         "boss_killed":                game.boss_killed,
         "level":                      p.level,
@@ -5511,14 +6419,139 @@ def delete_checkpoint(slot):
         print(f"[Checkpoint] Could not delete slot {slot}: {e}")
 
 
+def profile_creation_screen(screen, clock, fonts):
+    """First-launch screen to create the global player profile.
+    Modifies PROFILE in place and saves it. Returns when a username is confirmed."""
+    cursor_blink = 0
+    username     = ""
+    error_msg    = ""
+    error_timer  = 0
+    avatar_rect  = pygame.Rect(SW // 2 - 48, SH // 2 - 180, 96, 96)
+
+    def _pick_image():
+        try:
+            import tkinter as tk
+            from tkinter import filedialog
+            root = tk.Tk()
+            root.withdraw()
+            root.wm_attributes("-topmost", True)
+            path = filedialog.askopenfilename(
+                title="Choose profile picture",
+                filetypes=[("Image files", "*.png *.jpg *.jpeg *.bmp *.gif"),
+                           ("All files", "*.*")],
+            )
+            root.destroy()
+            return path or ""
+        except Exception:
+            return ""
+
+    while True:
+        clock.tick(FPS)
+        cursor_blink += 1
+        mx, my = pygame.mouse.get_pos()
+
+        # Build confirm button rect here so click handler can reference it
+        ib = pygame.Rect(SW // 2 - 160, avatar_rect.bottom + 52, 320, 48)
+        cb = pygame.Rect(SW // 2 - 120, ib.bottom + 20, 240, 50)
+
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                pygame.quit(); sys.exit()
+            if event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_BACKSPACE:
+                    username = username[:-1]
+                elif event.key == pygame.K_RETURN:
+                    if username.strip():
+                        PROFILE.username = username.strip()
+                        PROFILE.save()
+                        return
+                    else:
+                        error_msg   = "Please enter a username"
+                        error_timer = 120
+                elif len(username) < 20 and event.unicode.isprintable():
+                    username += event.unicode
+            if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                if avatar_rect.collidepoint(event.pos):
+                    path = _pick_image()
+                    if path:
+                        PROFILE.image_path         = path
+                        PROFILE._avatar_path_cache = None
+                elif cb.collidepoint(event.pos):
+                    if username.strip():
+                        PROFILE.username = username.strip()
+                        PROFILE.save()
+                        return
+                    else:
+                        error_msg   = "Please enter a username"
+                        error_timer = 120
+
+        if error_timer > 0:
+            error_timer -= 1
+
+        # ── Draw ─────────────────────────────────────────────────────────────
+        screen.fill(DARK)
+        for gx in range(0, SW, 64):
+            pygame.draw.line(screen, (22, 22, 36), (gx, 0), (gx, SH))
+        for gy in range(0, SH, 64):
+            pygame.draw.line(screen, (22, 22, 36), (0, gy), (SW, gy))
+
+        # Title
+        t = fonts["huge"].render("Create Your Profile", True, (140, 80, 255))
+        screen.blit(t, (SW // 2 - t.get_width() // 2, 80))
+        sub = fonts["small"].render(
+            "This profile is global — separate from your in-game username.", True, GRAY)
+        screen.blit(sub, (SW // 2 - sub.get_width() // 2, 140))
+
+        # Avatar box
+        av_surf = PROFILE.get_avatar()
+        hov_av  = avatar_rect.collidepoint(mx, my)
+        if av_surf:
+            screen.blit(av_surf, avatar_rect.topleft)
+        else:
+            pygame.draw.rect(screen, PANEL, avatar_rect, border_radius=8)
+            cam1 = fonts["tiny"].render("Click to",   True, GRAY)
+            cam2 = fonts["tiny"].render("add photo",  True, GRAY)
+            screen.blit(cam1, (avatar_rect.centerx - cam1.get_width() // 2, avatar_rect.centery - 12))
+            screen.blit(cam2, (avatar_rect.centerx - cam2.get_width() // 2, avatar_rect.centery + 4))
+        rim_col = (140, 80, 255) if hov_av else (80, 60, 140)
+        pygame.draw.rect(screen, rim_col, avatar_rect, 2, border_radius=8)
+        if hov_av:
+            hint = fonts["tiny"].render("Change photo", True, (140, 80, 255))
+            screen.blit(hint, (avatar_rect.centerx - hint.get_width() // 2, avatar_rect.bottom + 4))
+
+        # Username input
+        ul = fonts["small"].render("Choose a profile username:", True, GRAY)
+        screen.blit(ul, (SW // 2 - ul.get_width() // 2, avatar_rect.bottom + 24))
+        pygame.draw.rect(screen, PANEL, ib, border_radius=10)
+        pygame.draw.rect(screen, CYAN,  ib, 2, border_radius=10)
+        disp = username + ("|" if cursor_blink % 60 < 30 else "")
+        screen.blit(fonts["large"].render(disp, True, WHITE), (ib.x + 12, ib.y + 10))
+
+        # Confirm button
+        ready   = bool(username.strip())
+        btn_col = (140, 80, 255) if ready else GRAY
+        pygame.draw.rect(screen, lerp_color(PANEL, btn_col, 0.3 if ready else 0.08), cb, border_radius=10)
+        pygame.draw.rect(screen, btn_col, cb, 2 if ready else 1, border_radius=10)
+        cl = fonts["large"].render("Create Profile", True, btn_col)
+        screen.blit(cl, (cb.centerx - cl.get_width() // 2, cb.centery - cl.get_height() // 2))
+
+        # Error
+        if error_timer > 0:
+            em = fonts["small"].render(error_msg, True, RED)
+            screen.blit(em, (SW // 2 - em.get_width() // 2, cb.bottom + 12))
+
+        pygame.display.flip()
+
+
 def username_screen(screen, clock, fonts):
     """Main menu screen. Returns (username_str, checkpoint_or_None, save_slot, hardcore_bool)."""
-    # mode: "main" | "new_game" | "difficulty" | "slot_new" | "slot_load"
+    # mode: "main" | "difficulty" | "slot_new" | "slot_load"
     mode          = "main"
-    username      = ""
     selected_slot = None
-    difficulty    = "normal"   # "normal" or "hardcore"
+    difficulty    = "normal"
     cursor_blink  = 0
+    show_rename   = False
+    rename_buf    = ""
     show_settings = False
     show_credits  = False
     show_tutorial = False
@@ -5528,8 +6561,23 @@ def username_screen(screen, clock, fonts):
     slider_drag   = False
     show_extras       = False
     show_quit_confirm = False
-    show_lb       = False
-    lb_page       = 0   # 0 = normal, 1 = hardcore
+    show_lb           = False
+    show_achievements = False
+    show_inventory    = False
+    case_anim = {
+        "phase":      "idle",
+        "strip":      [],
+        "offset_x":   0.0,
+        "target_x":   0.0,
+        "frame":       0,       # current frame of animation
+        "total_frames": 0,      # total frames for the scroll
+        "result":     None,
+        "win_idx":    0,
+        "glow":       0,
+    }
+    ach_tab           = 0   # 0 = normal, 1 = hardcore
+    ach_scroll        = 0   # pixel scroll offset for the achievement grid
+    lb_page           = 0   # 0 = normal, 1 = hardcore
     show_patchnotes = False
     lb            = Leaderboard(hardcore=False)
     lb_hc         = Leaderboard(hardcore=True)
@@ -5602,12 +6650,16 @@ def username_screen(screen, clock, fonts):
     lb_rect       = pygame.Rect(0, 0, 1, 1)
     pn_rect       = pygame.Rect(0, 0, 1, 1)
     help_rect     = pygame.Rect(0, 0, 1, 1)
+    ach_rect      = pygame.Rect(0, 0, 1, 1)
+    pen_rect      = pygame.Rect(0, 0, 1, 1)   # rename profile name button
     # Main menu buttons
     btn_new_game  = pygame.Rect(0, 0, 1, 1)
     btn_load_game = pygame.Rect(0, 0, 1, 1)
     btn_settings  = pygame.Rect(0, 0, 1, 1)
     btn_credits   = pygame.Rect(0, 0, 1, 1)
     btn_extras    = pygame.Rect(0, 0, 1, 1)
+    btn_inventory = pygame.Rect(0, 0, 1, 1)
+    inv_open_rect = pygame.Rect(0, 0, 1, 1)   # "Open Case" button inside inventory
     play_rect     = None
     update_rect   = pygame.Rect(0, 0, 1, 1)
     close_rect    = pygame.Rect(SW - 48, 8, 36, 36)
@@ -5701,6 +6753,39 @@ def username_screen(screen, clock, fonts):
                         show_lb = False
                 continue
 
+            # ── Achievements overlay ───────────────────────────────────────
+            if show_achievements:
+                if event.type == pygame.KEYDOWN:
+                    if event.key in (pygame.K_LEFT, pygame.K_a):
+                        ach_tab    = 0
+                        ach_scroll = 0
+                    elif event.key in (pygame.K_RIGHT, pygame.K_d):
+                        ach_tab    = 1
+                        ach_scroll = 0
+                    elif event.key == pygame.K_UP:
+                        ach_scroll = max(0, ach_scroll - 60)
+                    elif event.key == pygame.K_DOWN:
+                        ach_scroll += 60   # clamped in draw below
+                    else:
+                        show_achievements = False
+                if event.type == pygame.MOUSEWHEEL:
+                    ach_scroll = max(0, ach_scroll - event.y * 40)
+                    # upper bound clamped in draw
+                if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                    AW, AH = 980, 580
+                    AX = SW // 2 - AW // 2; AY = SH // 2 - AH // 2
+                    tab0 = pygame.Rect(AX + 16,       AY + 12, 148, 34)
+                    tab1 = pygame.Rect(AX + 16 + 160, AY + 12, 148, 34)
+                    if tab0.collidepoint(event.pos):
+                        ach_tab    = 0
+                        ach_scroll = 0
+                    elif tab1.collidepoint(event.pos):
+                        ach_tab    = 1
+                        ach_scroll = 0
+                    elif not (AX <= event.pos[0] <= AX + AW and AY <= event.pos[1] <= AY + AH):
+                        show_achievements = False
+                continue
+
             # ── Patch notes overlay ────────────────────────────────────────
             if show_patchnotes:
                 if event.type == pygame.KEYDOWN:
@@ -5723,7 +6808,7 @@ def username_screen(screen, clock, fonts):
                                 show_help     = False
                             else:
                                 if menu_video[0]: menu_video[0].release()
-                                return username.strip(), None, selected_slot, (difficulty == "hardcore")
+                                return PROFILE.username, None, selected_slot, (difficulty == "hardcore")
                         elif event.key == pygame.K_ESCAPE:
                             show_tutorial = False
                             show_help     = False
@@ -5743,7 +6828,7 @@ def username_screen(screen, clock, fonts):
                             show_help     = False
                         else:
                             if menu_video[0]: menu_video[0].release()
-                            return username.strip(), None, selected_slot, (difficulty == "hardcore")
+                            return PROFILE.username, None, selected_slot, (difficulty == "hardcore")
                 continue
 
             # ── Credits overlay ────────────────────────────────────────────
@@ -5785,20 +6870,67 @@ def username_screen(screen, clock, fonts):
                         show_quit_confirm = False
                 continue
 
-            # ── Normal events ──────────────────────────────────────────────
+            # ── Inventory / case opening overlay ──────────────────────────
+            if show_inventory:
+                if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
+                    if case_anim["phase"] == "idle":
+                        show_inventory = False
+                    else:
+                        case_anim["phase"] = "idle"   # cancel animation
+                if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                    px_i, py_i = event.pos
+                    IW, IH = 860, 560
+                    IX = SW // 2 - IW // 2; IY = SH // 2 - IH // 2
+                    if case_anim["phase"] == "idle":
+                        # "Open Case" button click
+                        if inv_open_rect.collidepoint(px_i, py_i):
+                            if TOKENS.cases > 0 and TOKENS.spend(5):
+                                TOKENS.spend_case()
+                                result_entry = roll_case()
+                                CARD_W_STRIP = 140; CARD_GAP_STRIP = 8
+                                STRIP_STEP_I = CARD_W_STRIP + CARD_GAP_STRIP
+                                win_idx = 44
+                                strip = [random.choice(CASE_POOL) for _ in range(win_idx)]
+                                strip.append(result_entry)
+                                strip += [random.choice(CASE_POOL) for _ in range(8)]
+                                # Target: win_idx card centred in the IW-40 wide strip view
+                                target_x = win_idx * STRIP_STEP_I - ((860 - 40) // 2 - CARD_W_STRIP // 2)
+                                ANIM_FRAMES = 120  # 2 seconds at 60fps
+                                case_anim.update({
+                                    "phase":        "spinning",
+                                    "strip":        strip,
+                                    "offset_x":     0.0,
+                                    "target_x":     float(target_x),
+                                    "frame":        0,
+                                    "total_frames": ANIM_FRAMES,
+                                    "result":       result_entry,
+                                    "win_idx":      win_idx,
+                                    "glow":         0,
+                                })
+                        # Close if clicking outside the panel
+                        elif not (IX <= px_i <= IX + IW and IY <= py_i <= IY + IH):
+                            show_inventory = False
+                    elif case_anim["phase"] == "landed":
+                        # Click anywhere to dismiss result and go back to idle
+                        case_anim["phase"] = "idle"
+                        # Unlock the cosmetic they won
+                        won_id = case_anim["result"]["cosm_id"]
+                        TOKENS.unlock_cosmetic(won_id)
+                continue
             if event.type == pygame.KEYDOWN:
-                if mode == "new_game":
+                if show_rename:
                     if event.key == pygame.K_ESCAPE:
-                        mode = "main"
+                        show_rename = False; rename_buf = ""
+                    elif event.key == pygame.K_RETURN and rename_buf.strip():
+                        PROFILE.username = rename_buf.strip(); PROFILE.save()
+                        show_rename = False; rename_buf = ""
                     elif event.key == pygame.K_BACKSPACE:
-                        username = username[:-1]
-                    elif event.key == pygame.K_RETURN and username.strip():
-                        mode = "difficulty"
-                    elif len(username) < 16 and event.unicode.isprintable():
-                        username += event.unicode
+                        rename_buf = rename_buf[:-1]
+                    elif len(rename_buf) < 20 and event.unicode.isprintable():
+                        rename_buf += event.unicode
                 elif mode == "difficulty":
                     if event.key == pygame.K_ESCAPE:
-                        mode = "new_game"
+                        mode = "main"
                 elif mode in ("slot_new", "slot_load"):
                     if event.key == pygame.K_ESCAPE:
                         mode = "difficulty" if mode == "slot_new" else "main"
@@ -5808,16 +6940,32 @@ def username_screen(screen, clock, fonts):
                         show_quit_confirm = True
             if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                 px, py = event.pos
+                # ── Rename overlay consumes clicks ─────────────────────────
+                if show_rename:
+                    RW, RH = 360, 130
+                    RX = SW // 2 - RW // 2; RY = SH // 2 - RH // 2
+                    rib = pygame.Rect(RX + 16, RY + 44, RW - 32, 40)
+                    rcb = pygame.Rect(RX + 16, RY + 92, RW - 32, 30)
+                    if rcb.collidepoint(px, py) and rename_buf.strip():
+                        PROFILE.username = rename_buf.strip(); PROFILE.save()
+                        show_rename = False; rename_buf = ""
+                    elif not (RX <= px <= RX + RW and RY <= py <= RY + RH):
+                        show_rename = False; rename_buf = ""
+                    continue
                 if close_rect.collidepoint(px, py):
                     if menu_video[0]: menu_video[0].release()
                     pygame.quit(); sys.exit()
                 if update_rect.collidepoint(px, py) and _update_info.get("url"):
                     webbrowser.open(_update_info["url"])
-                # ── Main menu buttons — only active when no sub-panel is open ─
+                # ── Pen icon (rename) in profile widget ───────────────────
+                elif pen_rect.collidepoint(px, py):
+                    show_rename = True
+                    rename_buf  = PROFILE.username
+                # ── Main menu buttons — only active when no sub-panel open ─
                 elif mode == "main":
                     if btn_new_game.collidepoint(px, py):
-                        mode = "new_game"
-                        username = ""
+                        difficulty = "normal"
+                        mode = "difficulty"
                         show_extras = False
                     elif btn_load_game.collidepoint(px, py):
                         mode = "slot_load"
@@ -5830,6 +6978,10 @@ def username_screen(screen, clock, fonts):
                         show_credits  = True
                         credits_page  = 0
                         show_extras = False
+                    elif btn_inventory.collidepoint(px, py):
+                        show_inventory = True
+                        case_anim["phase"] = "idle"
+                        show_extras = False
                     elif btn_extras.collidepoint(px, py):
                         show_extras = not show_extras
                     elif show_extras:
@@ -5840,43 +6992,29 @@ def username_screen(screen, clock, fonts):
                         elif help_rect.collidepoint(px, py):
                             show_tutorial = True; show_help = True
                             tutorial_page = 0; show_extras = False
+                        elif ach_rect.collidepoint(px, py):
+                            show_achievements = True; show_extras = False
                         else:
                             show_extras = False
-                # ── New game: username entry play button ───────────────────
-                elif mode == "new_game":
-                    if play_rect and play_rect.collidepoint(px, py) and username.strip():
-                        mode = "difficulty"
-                    elif not (play_rect and play_rect.collidepoint(px, py)):
-                        NW, NH = 360, 150
-                        NX = SW // 2 - NW // 2
-                        NY = btn_new_game.bottom + 10
-                        if not (NX <= px <= NX + NW and NY <= py <= NY + NH):
-                            mode = "main"
                 # ── Difficulty picker ──────────────────────────────────────
                 elif mode == "difficulty":
                     if diff_normal_rect.collidepoint(px, py):
-                        difficulty = "normal"
-                        mode = "slot_new"
+                        difficulty = "normal"; mode = "slot_new"
                     elif diff_hard_rect.collidepoint(px, py):
-                        difficulty = "hardcore"
-                        mode = "slot_new"
-                    else:
-                        # Click outside → back to username
-                        if not (DX <= px <= DX + DW and DY <= py <= DY + DH):
-                            mode = "new_game"
+                        difficulty = "hardcore"; mode = "slot_new"
+                    elif not (DX <= px <= DX + DW and DY <= py <= DY + DH):
+                        mode = "main"
                 # ── Slot selection ─────────────────────────────────────────
                 elif mode == "slot_new":
                     for si, sr in enumerate(slot_rects):
                         if sr.collidepoint(px, py):
                             slot_num = si + 1
                             if is_first_run():
-                                show_tutorial = True
-                                show_help     = False
-                                tutorial_page = 0
-                                selected_slot = slot_num
+                                show_tutorial = True; show_help = False
+                                tutorial_page = 0; selected_slot = slot_num
                             else:
                                 if menu_video[0]: menu_video[0].release()
-                                return username.strip(), None, slot_num, (difficulty == "hardcore")
+                                return PROFILE.username, None, slot_num, (difficulty == "hardcore")
                 elif mode == "slot_load":
                     for si, sr in enumerate(slot_rects):
                         if sr.collidepoint(px, py):
@@ -5886,8 +7024,7 @@ def username_screen(screen, clock, fonts):
                                 if menu_video[0]: menu_video[0].release()
                                 hc = cp.get("hardcore", False)
                                 return cp["username"], cp, slot_num, hc
-                    SW2 = 480
-                    SX2 = SW // 2 - SW2 // 2
+                    SW2 = 480; SX2 = SW // 2 - SW2 // 2
                     SY2 = btn_load_game.bottom + 10
                     SH2 = NUM_SAVE_SLOTS * 64 + 56
                     if not (SX2 <= px <= SX2 + SW2 and SY2 <= py <= SY2 + SH2):
@@ -6080,61 +7217,45 @@ def username_screen(screen, clock, fonts):
         load_col    = (80, 220, 140) if has_saves else (70, 80, 70)
 
         rows = [
-            ("btn_new_game",  "New Game",   GREEN,            True),
-            ("btn_load_game", "Load Game",  load_col,         True),
-            ("btn_settings",  "Settings",   (140, 180, 255),  True),
-            ("btn_credits",   "Credits",    (200, 160, 255),  True),
-            ("btn_extras",    "Extras  ▾",  (255, 200, 80),   True),
+            ("btn_new_game",  "New Game",        GREEN,            True),
+            ("btn_load_game", "Load Game",        load_col,         True),
+            ("btn_settings",  "Settings",         (140, 180, 255),  True),
+            ("btn_credits",   "Credits",           (200, 160, 255),  True),
+            ("btn_inventory", "Inventory",         (255, 160, 60),   True),
+            ("btn_extras",    "Extras  ▾",        (255, 200, 80),   True),
         ]
 
         btn_new_game  = pygame.Rect(MX, MY,                       MBW, MBH)
         btn_load_game = pygame.Rect(MX, MY + (MBH + MGAP),        MBW, MBH)
         btn_settings  = pygame.Rect(MX, MY + (MBH + MGAP) * 2,   MBW, MBH)
         btn_credits   = pygame.Rect(MX, MY + (MBH + MGAP) * 3,   MBW, MBH)
-        btn_extras    = pygame.Rect(MX, MY + (MBH + MGAP) * 4,   MBW, MBH)
+        btn_inventory = pygame.Rect(MX, MY + (MBH + MGAP) * 4,   MBW, MBH)
+        btn_extras    = pygame.Rect(MX, MY + (MBH + MGAP) * 5,   MBW, MBH)
 
         for rect, (_, label, col, active) in zip(
-                [btn_new_game, btn_load_game, btn_settings, btn_credits, btn_extras], rows):
+                [btn_new_game, btn_load_game, btn_settings, btn_credits, btn_inventory, btn_extras], rows):
             bg = lerp_color(PANEL, col, 0.25 if active else 0.08)
             pygame.draw.rect(screen, bg, rect, border_radius=10)
             pygame.draw.rect(screen, col if active else GRAY, rect, 2, border_radius=10)
             lbl = fonts["large"].render(label, True, col if active else GRAY)
             screen.blit(lbl, (rect.centerx - lbl.get_width() // 2,
                                rect.centery - lbl.get_height() // 2))
+            # Case count badge on Inventory button
+            if label == "Inventory" and TOKENS.cases > 0:
+                badge_r = 11
+                bx_b = rect.right - badge_r - 4
+                by_b = rect.top   - badge_r + 4
+                pygame.draw.circle(screen, RED,   (bx_b, by_b), badge_r)
+                pygame.draw.circle(screen, WHITE, (bx_b, by_b), badge_r, 1)
+                bc_s = fonts["tiny"].render(str(TOKENS.cases), True, WHITE)
+                screen.blit(bc_s, (bx_b - bc_s.get_width() // 2, by_b - bc_s.get_height() // 2))
 
-        # ── New game sub-panel (username entry) ───────────────────────────────
+        # ── Sub-panel placeholders (no new_game sub-panel — profile name used directly) ─
         play_rect  = None
         slot_rects = [pygame.Rect(0, 0, 1, 1)] * NUM_SAVE_SLOTS
         diff_normal_rect = pygame.Rect(0, 0, 1, 1)
         diff_hard_rect   = pygame.Rect(0, 0, 1, 1)
-        DX = DY = DW = DH = 0   # difficulty panel bounds for outside-click detection
-
-        if mode == "new_game":
-            NW, NH = 360, 150
-            NX = SW // 2 - NW // 2
-            NY = btn_new_game.bottom + 10
-            np_s = pygame.Surface((NW, NH), pygame.SRCALPHA)
-            pygame.draw.rect(np_s, (18, 22, 38, 235), (0, 0, NW, NH), border_radius=12)
-            screen.blit(np_s, (NX, NY))
-            pygame.draw.rect(screen, GREEN, (NX, NY, NW, NH), 2, border_radius=12)
-            prompt = fonts["small"].render("Enter your username:", True, GRAY)
-            screen.blit(prompt, (NX + 16, NY + 14))
-            ibx = NX + 16; iby = NY + 38; ibw = NW - 32; ibh = 40
-            pygame.draw.rect(screen, PANEL, (ibx, iby, ibw, ibh), border_radius=8)
-            pygame.draw.rect(screen, CYAN,  (ibx, iby, ibw, ibh), 2, border_radius=8)
-            display_text = username + ("|" if cursor_blink % 60 < 30 else "")
-            screen.blit(fonts["large"].render(display_text, True, WHITE), (ibx + 10, iby + 6))
-            play_rect = pygame.Rect(NX + 16, NY + 96, NW - 32, 38)
-            if username.strip():
-                pygame.draw.rect(screen, lerp_color(PANEL, GREEN, 0.3), play_rect, border_radius=8)
-                pygame.draw.rect(screen, GREEN, play_rect, 2, border_radius=8)
-                pl = fonts["med"].render("Choose difficulty  ►", True, GREEN)
-            else:
-                pygame.draw.rect(screen, PANEL, play_rect, border_radius=8)
-                pygame.draw.rect(screen, GRAY,  play_rect, 1, border_radius=8)
-                pl = fonts["med"].render("Type a name first...", True, GRAY)
-            screen.blit(pl, (play_rect.centerx - pl.get_width() // 2,
-                              play_rect.centery - pl.get_height() // 2))
+        DX = DY = DW = DH = 0
 
         # ── Difficulty picker ─────────────────────────────────────────────────
         if mode == "difficulty":
@@ -6194,7 +7315,8 @@ def username_screen(screen, clock, fonts):
                 SY2 = btn_new_game.bottom + 10
                 panel_col = (255, 80, 40) if difficulty == "hardcore" else GREEN
                 diff_label = "  [HARDCORE]" if difficulty == "hardcore" else ""
-                title_str = f"Choose slot — \"{username.strip()}\"{diff_label}"
+                pname = PROFILE.username or "Player"
+                title_str = f"Choose slot — \"{pname}\"{diff_label}"
             else:
                 SY2 = btn_load_game.bottom + 10
                 panel_col = (80, 220, 140)
@@ -6256,9 +7378,10 @@ def username_screen(screen, clock, fonts):
         # ── Extras sub-panel dropdown ─────────────────────────────────────────
         EX_W = MBW; EX_BH = 40; EX_GAP = 6
         EX_items = [
-            ("Leaderboard", YELLOW,          "lb"),
-            ("Patch Notes", (100, 220, 160), "pn"),
-            ("Help",        (255, 180, 80),  "help"),
+            ("Leaderboard",  YELLOW,            "lb"),
+            ("Achievements", (180, 120, 255),   "ach"),
+            ("Patch Notes",  (100, 220, 160),   "pn"),
+            ("Help",         (255, 180, 80),     "help"),
         ]
         EX_H  = EX_BH * len(EX_items) + EX_GAP * (len(EX_items) - 1) + 16
         EX_X  = btn_extras.x
@@ -6267,8 +7390,9 @@ def username_screen(screen, clock, fonts):
         for i in range(len(EX_items)):
             ex_rects.append(pygame.Rect(EX_X, EX_Y + 8 + i * (EX_BH + EX_GAP), EX_W, EX_BH))
         lb_rect   = ex_rects[0]
-        pn_rect   = ex_rects[1]
-        help_rect = ex_rects[2]
+        ach_rect  = ex_rects[1]
+        pn_rect   = ex_rects[2]
+        help_rect = ex_rects[3]
 
         if show_extras:
             ep = pygame.Surface((EX_W, EX_H), pygame.SRCALPHA)
@@ -6284,9 +7408,373 @@ def username_screen(screen, clock, fonts):
                 screen.blit(el, (er.centerx - el.get_width() // 2,
                                   er.centery - el.get_height() // 2))
 
+        # ── Profile widget — top-left ─────────────────────────────────────────
+        PW_X = 10; PW_Y = 44
+        av      = PROFILE.get_avatar()
+        AV_SIZE = 64
+        av_box  = pygame.Rect(PW_X, PW_Y, AV_SIZE, AV_SIZE)
+        pygame.draw.rect(screen, PANEL, av_box, border_radius=8)
+        pygame.draw.rect(screen, (140, 80, 255), av_box, 1, border_radius=8)
+        if av:
+            screen.blit(av, av_box.topleft)
+            pygame.draw.rect(screen, (140, 80, 255), av_box, 1, border_radius=8)
+        else:
+            init   = PROFILE.username[:1].upper() if PROFILE.username else "?"
+            init_s = fonts["large"].render(init, True, (140, 80, 255))
+            screen.blit(init_s, (av_box.centerx - init_s.get_width() // 2,
+                                  av_box.centery - init_s.get_height() // 2))
+
+        tx       = PW_X + AV_SIZE + 8
+        name_s   = fonts["med"].render(PROFILE.username or "No Profile", True, WHITE)
+        lvl_s    = fonts["small"].render(f"Account Lvl  {PROFILE.account_level}", True, (180, 140, 255))
+        xp_in_lvl = PROFILE.account_xp % PROFILE.XP_PER_LEVEL
+        screen.blit(name_s, (tx, PW_Y + 4))
+        screen.blit(lvl_s,  (tx, PW_Y + 26))
+
+        # Pen / rename icon — small pencil drawn to the right of the name
+        pen_x = tx + name_s.get_width() + 6
+        pen_y = PW_Y + 4
+        pen_rect = pygame.Rect(pen_x, pen_y, 16, 16)
+        pen_hov  = pen_rect.collidepoint(mx_now, my_now)
+        pc = (200, 160, 255) if pen_hov else (100, 80, 140)
+        # Pencil body diagonal
+        pygame.draw.line(screen, pc, (pen_x + 2, pen_y + 13), (pen_x + 13, pen_y + 2), 2)
+        # Tip
+        pygame.draw.line(screen, pc, (pen_x + 1, pen_y + 14), (pen_x + 3, pen_y + 14), 1)
+        pygame.draw.line(screen, pc, (pen_x + 1, pen_y + 13), (pen_x + 1, pen_y + 15), 1)
+        # Eraser end
+        pygame.draw.rect(screen, pc, (pen_x + 11, pen_y + 1, 4, 3))
+
+        xp_bar_w = 100
+        draw_bar(screen, tx, PW_Y + 46, xp_bar_w, 6,
+                 xp_in_lvl, PROFILE.XP_PER_LEVEL, (140, 80, 255))
+        xp_s = fonts["tiny"].render(f"{xp_in_lvl}/{PROFILE.XP_PER_LEVEL} XP", True, GRAY)
+        screen.blit(xp_s, (tx + xp_bar_w + 4, PW_Y + 42))
+
+        # ── Rename overlay ────────────────────────────────────────────────────
+        if show_rename:
+            ov_r = pygame.Surface((SW, SH), pygame.SRCALPHA)
+            ov_r.fill((0, 0, 0, 180))
+            screen.blit(ov_r, (0, 0))
+            RW, RH = 360, 130
+            RX = SW // 2 - RW // 2; RY = SH // 2 - RH // 2
+            pygame.draw.rect(screen, (18, 16, 30), (RX, RY, RW, RH), border_radius=12)
+            pygame.draw.rect(screen, (140, 80, 255), (RX, RY, RW, RH), 2, border_radius=12)
+            rt = fonts["med"].render("Rename Profile", True, (180, 140, 255))
+            screen.blit(rt, (RX + RW // 2 - rt.get_width() // 2, RY + 10))
+            rib = pygame.Rect(RX + 16, RY + 44, RW - 32, 38)
+            pygame.draw.rect(screen, PANEL, rib, border_radius=8)
+            pygame.draw.rect(screen, CYAN,  rib, 2, border_radius=8)
+            disp_r = rename_buf + ("|" if cursor_blink % 60 < 30 else "")
+            screen.blit(fonts["large"].render(disp_r, True, WHITE), (rib.x + 10, rib.y + 6))
+            rcb = pygame.Rect(RX + 16, RY + 92, RW - 32, 30)
+            rc_col = GREEN if rename_buf.strip() else GRAY
+            pygame.draw.rect(screen, lerp_color(PANEL, rc_col, 0.3), rcb, border_radius=8)
+            pygame.draw.rect(screen, rc_col, rcb, 1, border_radius=8)
+            rc_lbl = fonts["small"].render("Confirm", True, rc_col)
+            screen.blit(rc_lbl, (rcb.centerx - rc_lbl.get_width() // 2,
+                                  rcb.centery - rc_lbl.get_height() // 2))
+
+        # ── Inventory overlay ─────────────────────────────────────────────────
+        if show_inventory:
+            ov_inv = pygame.Surface((SW, SH), pygame.SRCALPHA)
+            ov_inv.fill((0, 0, 0, 210))
+            screen.blit(ov_inv, (0, 0))
+
+            IW, IH = 860, 560
+            IX = SW // 2 - IW // 2; IY = SH // 2 - IH // 2
+            INV_COL = (255, 160, 60)
+            pygame.draw.rect(screen, (14, 12, 24), (IX, IY, IW, IH), border_radius=16)
+            pygame.draw.rect(screen, INV_COL,      (IX, IY, IW, IH), 2, border_radius=16)
+
+            # Title
+            ititle = fonts["large"].render("Inventory", True, INV_COL)
+            screen.blit(ititle, (IX + IW // 2 - ititle.get_width() // 2, IY + 14))
+
+            if case_anim["phase"] == "idle":
+                # ── Idle view ─────────────────────────────────────────────────
+                # Case icon (drawn box)
+                cx_case = IX + IW // 2
+                cy_case = IY + 200
+                case_size = 80
+                pygame.draw.rect(screen, (60, 42, 18),
+                                 (cx_case - case_size, cy_case - case_size // 2,
+                                  case_size * 2, case_size), border_radius=8)
+                pygame.draw.rect(screen, INV_COL,
+                                 (cx_case - case_size, cy_case - case_size // 2,
+                                  case_size * 2, case_size), 3, border_radius=8)
+                # Clasp
+                pygame.draw.rect(screen, INV_COL,
+                                 (cx_case - 14, cy_case - case_size // 2 - 10, 28, 12),
+                                 border_radius=4)
+                pygame.draw.rect(screen, (40, 28, 8),
+                                 (cx_case - 8, cy_case - case_size // 2 - 8, 16, 8),
+                                 border_radius=3)
+                # Case count
+                cc_s = fonts["huge"].render(str(TOKENS.cases), True, WHITE)
+                screen.blit(cc_s, (cx_case - cc_s.get_width() // 2, cy_case - case_size // 2 + 12))
+                cl_s = fonts["small"].render(f"case{'s' if TOKENS.cases != 1 else ''} in inventory", True, GRAY)
+                screen.blit(cl_s, (IX + IW // 2 - cl_s.get_width() // 2, cy_case + case_size // 2 + 10))
+
+                # Key cost note
+                key_s = fonts["small"].render("Key cost: 5 tokens per open", True, (255, 200, 60))
+                screen.blit(key_s, (IX + IW // 2 - key_s.get_width() // 2, cy_case + case_size // 2 + 36))
+
+                # Open button
+                can_open = TOKENS.cases > 0 and TOKENS.total >= 5
+                ob_w, ob_h = 260, 52
+                inv_open_rect = pygame.Rect(IX + IW // 2 - ob_w // 2, IY + IH - 110, ob_w, ob_h)
+                ob_col = INV_COL if can_open else GRAY
+                pygame.draw.rect(screen, lerp_color(PANEL, ob_col, 0.3 if can_open else 0.1),
+                                 inv_open_rect, border_radius=10)
+                pygame.draw.rect(screen, ob_col, inv_open_rect, 2, border_radius=10)
+                ob_lbl = fonts["large"].render("Open Case  (5 tokens)", True, ob_col)
+                screen.blit(ob_lbl, (inv_open_rect.centerx - ob_lbl.get_width() // 2,
+                                     inv_open_rect.centery - ob_lbl.get_height() // 2))
+
+                hint_inv = fonts["tiny"].render("ESC to close", True, GRAY)
+                screen.blit(hint_inv, (IX + IW // 2 - hint_inv.get_width() // 2, IY + IH - 24))
+
+            else:
+                # ── Animation / result view ───────────────────────────────────
+                CARD_W_S = 140; CARD_H_S = 180; CARD_GAP = 8
+                STRIP_STEP = CARD_W_S + CARD_GAP
+
+                # Advance animation each frame
+                if case_anim["phase"] == "spinning":
+                    f  = case_anim["frame"]
+                    tf = case_anim["total_frames"]
+                    case_anim["frame"] = f + 1
+                    if f >= tf:
+                        case_anim["offset_x"] = case_anim["target_x"]
+                        case_anim["phase"]    = "landed"
+                        case_anim["glow"]     = 0
+                        TOKENS.unlock_cosmetic(case_anim["result"]["cosm_id"])
+                    else:
+                        # Cubic ease-out: fast start, smooth deceleration
+                        t_norm = f / tf          # 0 → 1
+                        ease   = 1 - (1 - t_norm) ** 3
+                        case_anim["offset_x"] = ease * case_anim["target_x"]
+
+                if case_anim["phase"] == "landed":
+                    case_anim["glow"] = (case_anim["glow"] + 1) % 60
+
+                # Draw strip inside a clipping region
+                strip_y    = IY + 140
+                strip_clip = pygame.Rect(IX + 20, strip_y, IW - 40, CARD_H_S)
+                pygame.draw.rect(screen, (10, 8, 20), strip_clip, border_radius=6)
+
+                strip_surf = pygame.Surface((IW - 40, CARD_H_S), pygame.SRCALPHA)
+                off = int(case_anim["offset_x"])
+                for ci, entry in enumerate(case_anim["strip"]):
+                    card_x = ci * STRIP_STEP - off
+                    if card_x + CARD_W_S < 0 or card_x > IW - 40:
+                        continue
+                    rarity_name, rarity_col = entry["rarity"]
+                    # Card background
+                    pygame.draw.rect(strip_surf, lerp_color((20, 16, 30), rarity_col, 0.25),
+                                     (card_x, 4, CARD_W_S, CARD_H_S - 8), border_radius=8)
+                    pygame.draw.rect(strip_surf, rarity_col,
+                                     (card_x, 4, CARD_W_S, CARD_H_S - 8), 2, border_radius=8)
+                    # Cosmetic preview circle
+                    cosm = next((c for c in COSMETICS + CASE_COSMETICS if c["id"] == entry["cosm_id"]), None)
+                    if cosm:
+                        _draw_cosmetic_preview(strip_surf, cosm["pattern"], cosm["preview"],
+                                               card_x + CARD_W_S // 2, CARD_H_S // 2 - 14, 30)
+                        cn = fonts["tiny"].render(cosm["name"], True, WHITE)
+                        strip_surf.blit(cn, (card_x + CARD_W_S // 2 - cn.get_width() // 2,
+                                             CARD_H_S - 36))
+                    rar_s = fonts["tiny"].render(rarity_name, True, rarity_col)
+                    strip_surf.blit(rar_s, (card_x + CARD_W_S // 2 - rar_s.get_width() // 2,
+                                            CARD_H_S - 20))
+
+                screen.blit(strip_surf, (IX + 20, strip_y))
+
+                # Centre indicator line
+                line_x = IX + IW // 2
+                pygame.draw.rect(screen, (255, 255, 255),
+                                 (line_x - 2, strip_y - 6, 4, CARD_H_S + 12), border_radius=2)
+
+                # Result display when landed
+                if case_anim["phase"] == "landed":
+                    won  = case_anim["result"]
+                    cosm = next((c for c in COSMETICS + CASE_COSMETICS if c["id"] == won["cosm_id"]), None)
+                    rarity_name, rarity_col = won["rarity"]
+                    glow_pulse = abs(math.sin(case_anim["glow"] * 0.1)) * 0.5 + 0.5
+                    glow_col   = tuple(int(c * glow_pulse) for c in rarity_col)
+
+                    res_y = strip_y + CARD_H_S + 18
+                    won_s = fonts["large"].render(
+                        f"You won: {cosm['name'] if cosm else won['cosm_id']}!", True, rarity_col)
+                    pygame.draw.rect(screen, glow_col,
+                                     (IX + IW // 2 - won_s.get_width() // 2 - 12, res_y - 4,
+                                      won_s.get_width() + 24, won_s.get_height() + 8), border_radius=8)
+                    screen.blit(won_s, (IX + IW // 2 - won_s.get_width() // 2, res_y))
+                    rar_res = fonts["med"].render(rarity_name, True, rarity_col)
+                    screen.blit(rar_res, (IX + IW // 2 - rar_res.get_width() // 2, res_y + 36))
+                    click_hint = fonts["small"].render("Click anywhere to continue", True, GRAY)
+                    screen.blit(click_hint, (IX + IW // 2 - click_hint.get_width() // 2, IY + IH - 30))
+                else:
+                    spin_hint = fonts["small"].render("Opening...", True, GRAY)
+                    screen.blit(spin_hint, (IX + IW // 2 - spin_hint.get_width() // 2, IY + IH - 30))
+
         # Rotating tip
         tip_s = fonts["small"].render(f"Tip: {MENU_TIPS[tip_idx]}", True, YELLOW)
         screen.blit(tip_s, (SW // 2 - tip_s.get_width() // 2, SH - 44))
+
+        # ── Achievements overlay ──────────────────────────────────────────────
+        if show_achievements:
+            ov_a = pygame.Surface((SW, SH), pygame.SRCALPHA)
+            ov_a.fill((0, 0, 0, 210))
+            screen.blit(ov_a, (0, 0))
+
+            AW, AH = 980, 580
+            AX = SW // 2 - AW // 2; AY = SH // 2 - AH // 2
+            ach_col = (255, 80, 40) if ach_tab == 1 else (180, 120, 255)
+            pygame.draw.rect(screen, (18, 16, 30), (AX, AY, AW, AH), border_radius=16)
+            pygame.draw.rect(screen, ach_col, (AX, AY, AW, AH), 2, border_radius=16)
+
+            # Tab buttons
+            tab_labels = ["Normal", "Hardcore"]
+            tab_cols   = [(180, 120, 255), (255, 80, 40)]
+            for ti in range(2):
+                tr = pygame.Rect(AX + 16 + ti * 160, AY + 12, 148, 34)
+                is_active = (ti == ach_tab)
+                tc = tab_cols[ti]
+                pygame.draw.rect(screen, lerp_color(PANEL, tc, 0.4 if is_active else 0.1), tr, border_radius=8)
+                pygame.draw.rect(screen, tc, tr, 2 if is_active else 1, border_radius=8)
+                tl = fonts["med"].render(tab_labels[ti], True, tc)
+                screen.blit(tl, (tr.centerx - tl.get_width() // 2, tr.centery - tl.get_height() // 2))
+                if is_active:
+                    pygame.draw.rect(screen, tc, (tr.x, tr.bottom + 2, tr.width, 3), border_radius=2)
+
+            # Achievement count summary
+            NORMAL_CATS = {"bosses", "levels", "waves", "kills", "cosmetics", "weapons", "gold", "meta"}
+            HC_CATS     = {"hardcore"}
+            visible_achs = [a for a in ACHIEVEMENTS
+                            if a["cat"] in (HC_CATS if ach_tab == 1 else NORMAL_CATS)]
+            tab_ids        = [a["id"] for a in visible_achs]
+            unlocked_count = sum(1 for aid in tab_ids if aid in PROFILE.unlocked)
+            prog_s = fonts["small"].render(f"{unlocked_count} / {len(tab_ids)} unlocked", True, GRAY)
+            screen.blit(prog_s, (AX + AW - prog_s.get_width() - 28, AY + 20))
+
+            # Grid layout constants — taller cards to fit all content without overflow
+            CARD_W    = 282; CARD_H   = 90
+            COLS      = 3;   CGAP_X   = 12; CGAP_Y = 10
+            SCROLL_W  = 8
+            GRID_X    = AX + 16
+            GRID_Y    = AY + 58
+            GRID_W    = AW - 32 - SCROLL_W - 6
+            GRID_MAX_H = AH - 58 - 36
+
+            total_rows   = math.ceil(len(visible_achs) / COLS)
+            total_grid_h = total_rows * (CARD_H + CGAP_Y)
+
+            # Clamp scroll
+            max_scroll   = max(0, total_grid_h - GRID_MAX_H)
+            ach_scroll   = max(0, min(ach_scroll, max_scroll))
+
+            # Helper: truncate text to fit max_w pixels, appending '...'
+            def _fit(font, text, max_w):
+                if font.size(text)[0] <= max_w:
+                    return text
+                while text and font.size(text + "...")[0] > max_w:
+                    text = text[:-1]
+                return text + "..."
+
+            clip_surf = pygame.Surface((GRID_W, GRID_MAX_H), pygame.SRCALPHA)
+            clip_surf.fill((0, 0, 0, 0))
+
+            for idx, ach in enumerate(visible_achs):
+                col_i = idx % COLS
+                row_i = idx // COLS
+                cx    = col_i * (CARD_W + CGAP_X)
+                cy    = row_i * (CARD_H + CGAP_Y) - ach_scroll
+
+                if cy + CARD_H < 0 or cy > GRID_MAX_H:
+                    continue
+
+                is_done  = ach["id"] in PROFILE.unlocked
+                card_col = ach_col if is_done else (60, 60, 75)
+                bg_col   = lerp_color((18, 16, 30), card_col, 0.25 if is_done else 0.06)
+                pygame.draw.rect(clip_surf, bg_col,   (cx, cy, CARD_W, CARD_H), border_radius=8)
+                pygame.draw.rect(clip_surf, card_col, (cx, cy, CARD_W, CARD_H),
+                                 1 if not is_done else 2, border_radius=8)
+
+                # Usable inner width (10px left pad, 32px right reserved for checkmark/tokens)
+                INNER_W = CARD_W - 42
+
+                # Row 1 — achievement name
+                name_col  = WHITE if is_done else (90, 90, 100)
+                name_text = _fit(fonts["small"], ach["name"], INNER_W)
+                nm = fonts["small"].render(name_text, True, name_col)
+                clip_surf.blit(nm, (cx + 10, cy + 7))
+
+                # Row 2 — description (always shown, tiny font)
+                desc_col  = (160, 160, 170) if is_done else (75, 75, 85)
+                desc_text = _fit(fonts["tiny"], ach["desc"], INNER_W + 20)
+                ds = fonts["tiny"].render(desc_text, True, desc_col)
+                clip_surf.blit(ds, (cx + 10, cy + 27))
+
+                # Row 3 — progress bar (only when trackable and not yet done)
+                prog = PROFILE.get_progress(ach["id"])
+                if prog and not is_done:
+                    cur, mx2   = prog
+                    bar_x      = cx + 10
+                    bar_y      = cy + 44
+                    bar_w      = CARD_W - 20
+                    bar_h      = 6
+                    pygame.draw.rect(clip_surf, (40, 40, 55), (bar_x, bar_y, bar_w, bar_h), border_radius=3)
+                    fill_w = int(bar_w * min(cur, mx2) / mx2) if mx2 else 0
+                    if fill_w > 0:
+                        pygame.draw.rect(clip_surf, card_col, (bar_x, bar_y, fill_w, bar_h), border_radius=3)
+                    # Progress text: "cur / max" centred below bar
+                    prog_text = f"{cur:,} / {mx2:,}"
+                    pt_s = fonts["tiny"].render(prog_text, True, (120, 120, 140))
+                    clip_surf.blit(pt_s, (cx + 10, bar_y + 9))
+                else:
+                    # When done or no progress, just leave the space (description fills it)
+                    pass
+
+                # Row 4 — token reward (bottom-left) + checkmark (bottom-right)
+                tok_col  = (255, 200, 60) if is_done else (80, 70, 40)
+                tok_text = f"+{ach['tokens']} token{'s' if ach['tokens'] != 1 else ''}"
+                tok_s    = fonts["tiny"].render(tok_text, True, tok_col)
+                clip_surf.blit(tok_s, (cx + 10, cy + CARD_H - 17))
+
+                if is_done:
+                    ck_x = cx + CARD_W - 22
+                    ck_y = cy + CARD_H - 16
+                    pygame.draw.line(clip_surf, card_col, (ck_x,      ck_y + 6),  (ck_x + 5,  ck_y + 12), 2)
+                    pygame.draw.line(clip_surf, card_col, (ck_x + 5,  ck_y + 12), (ck_x + 13, ck_y),      2)
+
+            screen.blit(clip_surf, (GRID_X, GRID_Y))
+
+            # ── Scrollbar ─────────────────────────────────────────────────────
+            if total_grid_h > GRID_MAX_H:
+                sb_x    = AX + AW - SCROLL_W - 14
+                sb_y    = GRID_Y
+                sb_h    = GRID_MAX_H
+                # Track
+                pygame.draw.rect(screen, (35, 30, 50), (sb_x, sb_y, SCROLL_W, sb_h), border_radius=4)
+                # Thumb — proportional size, clamped to track
+                thumb_h = max(30, int(sb_h * GRID_MAX_H / total_grid_h))
+                thumb_y = sb_y + int((sb_h - thumb_h) * ach_scroll / max_scroll) if max_scroll else sb_y
+                pygame.draw.rect(screen, ach_col, (sb_x, thumb_y, SCROLL_W, thumb_h), border_radius=4)
+
+            # Fade top and bottom edges of grid for a soft clipping look
+            for edge_y, direction in [(GRID_Y, 1), (GRID_Y + GRID_MAX_H - 20, -1)]:
+                for i in range(20):
+                    fade_a = int(210 * (1 - i / 20)) if direction == 1 else int(210 * (i / 20))
+                    fade_s = pygame.Surface((GRID_W, 1), pygame.SRCALPHA)
+                    fade_s.fill((18, 16, 30, fade_a))
+                    screen.blit(fade_s, (GRID_X, edge_y + i * direction))
+
+            # Navigation hint
+            hint_a = fonts["tiny"].render(
+                "◄/► or A/D — switch tabs   |   scroll or Up/Down — scroll list   |   click outside — close",
+                True, GRAY)
+            screen.blit(hint_a, (AX + AW // 2 - hint_a.get_width() // 2, AY + AH - 22))
 
         # ── Leaderboard overlay ───────────────────────────────────────────────
         if show_lb:
@@ -6678,7 +8166,7 @@ def username_screen(screen, clock, fonts):
                 btn_label = "Next ►"
                 btn_col   = CYAN
             elif show_help:
-                btn_label = "Close  ✕"
+                btn_label = "Close X"
                 btn_col   = (255, 180, 80)
             else:
                 btn_label = "Play!  ►"
@@ -6788,7 +8276,7 @@ class Game:
         self._window          = window
         self._apply_display   = apply_display_fn
         self._overlay = pygame.Surface((SW, SH), pygame.SRCALPHA)
-        pygame.display.set_caption("Dungeon Crawler 44.0b12")
+        pygame.display.set_caption("Dungeon Crawler 45.0b10")
         self.clock    = pygame.time.Clock()
         self.world_w  = 3000; self.world_h = 3000
         self.username = username
@@ -6832,6 +8320,10 @@ class Game:
         p.perks = {str(k): float(v) for k, v in cp.get("perks", {}).items()}
         # Restore hardcore flag
         self.hardcore = cp.get("hardcore", False)
+        # Sync watermarks to the restored values so achievement checks only count
+        # kills and gold earned *after* this load point, not the whole run history.
+        self._ach_kills_credited = p.kill_count
+        self._ach_gold_credited  = p.gold
         # Wave state — set wave to (saved_wave) so the break's wave += 1 lands on saved_wave + 1.
         # The player resumes from the wave AFTER the one they saved on.
         self.wave              = saved_wave
@@ -6873,6 +8365,7 @@ class Game:
         self.shop           = Shop()
         self.perk_screen    = PerkScreen(self.player, self.fonts)
         self.pending_save   = False   # True when a save is deferred until perk screen closes
+        self.ach_toasts     = []      # list of dicts: {name, tokens, cat, timer, max_timer}
         self.game_over      = False
         self.paused         = False
         self.lb_rank        = None
@@ -6881,8 +8374,10 @@ class Game:
         self.pause_dev       = False
         self.pause_dev_input = ""    # password entry buffer
         self.pause_dev_prompt = False  # password prompt visible
-        self.dev_boss_expand  = False  # True when boss-pick sub-menu is open
-        self.dev_perk_expand  = False  # True when perk-give sub-menu is open
+        self.dev_boss_expand  = False
+        self.dev_perk_expand  = False
+        self.dev_ach_expand   = False
+        self.dev_ach_scroll   = 0   # pixel scroll for achievement flyout
         # Boss state
         self.boss           = None
         self.boss_clone     = None   # Vexara phase-2 clone
@@ -6893,6 +8388,11 @@ class Game:
         random.shuffle(self.boss_pool)
         self.boss_pool_idx  = 0
         self.boss_killed    = 0
+        self._bosses_killed_names = set()   # tracks which named bosses died this run
+        # Watermarks — track what has already been credited to PROFILE so we only
+        # ever add the *delta* each time check_achievements is called, not the total.
+        self._ach_kills_credited = 0
+        self._ach_gold_credited  = 0
         # Wave system
         self.wave              = 1
         self.wave_active       = True
@@ -7093,7 +8593,13 @@ class Game:
     def _on_boss_killed(self):
         b = self.boss
         self.boss_killed += 1
+        self._bosses_killed_names.add(b.name)   # track for achievements
         TOKENS.earn(1)   # +1 persistent token per boss kill
+        # 25% chance to drop a case on boss kill
+        if random.random() < 0.25:
+            TOKENS.add_case()
+            self.floating_texts.append(
+                FloatingText(b.x, b.y - 150, "Case dropped! Check Inventory.", (255, 200, 40), 20))
         if b.name == "Seraphix the Fallen":
             TOKENS.record_seraphix_kill()
         if b.name == "Nyxoth the Abyssal":
@@ -7147,6 +8653,9 @@ class Game:
             self.floating_texts.append(
                 FloatingText(self.player.x, self.player.y - 60,
                              f"LEVEL UP!  {self.player.level}", CYAN, 22))
+        # Check achievements after boss kill
+        new_achs = PROFILE.check_achievements(self)
+        self._queue_achievement_toasts(new_achs)
         # Always offer a perk after a boss
         self.perk_screen.offer()
         # Defer save until after the perk is picked (or immediately if no slot assigned)
@@ -7714,6 +9223,114 @@ class Game:
             pygame.draw.rect(self.screen, wall_col,  (bx, by, self.world_w, self.world_h), 8)
             pygame.draw.rect(self.screen, wall_col2, (bx, by, self.world_w, self.world_h), 3)
 
+    def _queue_achievement_toasts(self, new_ach_ids):
+        """Add newly-unlocked achievements to the toast queue and play the SFX once."""
+        if not new_ach_ids:
+            return
+        SOUNDS.play("achievement")
+        TOAST_DURATION = FPS * 4   # 4 seconds on screen
+        for aid in new_ach_ids:
+            ach = next(a for a in ACHIEVEMENTS if a["id"] == aid)
+            self.ach_toasts.append({
+                "name":      ach["name"],
+                "tokens":    ach["tokens"],
+                "cat":       ach["cat"],
+                "timer":     TOAST_DURATION,
+                "max_timer": TOAST_DURATION,
+            })
+
+    def draw_achievement_toasts(self):
+        """Draw stacked achievement unlock toasts in the bottom-right corner."""
+        if not self.ach_toasts:
+            return
+
+        TOAST_W   = 320
+        TOAST_H   = 62
+        TOAST_GAP = 8
+        SLIDE_FRAMES = 18   # frames for slide-in animation
+        FADE_FRAMES  = 30   # frames for fade-out at end
+        MARGIN_R  = 14
+        MARGIN_B  = 14
+        ICON_SIZE = 10      # token dot icon
+
+        # Advance timers — tick each toast down, remove expired
+        still_alive = []
+        for toast in self.ach_toasts:
+            toast["timer"] -= 1
+            if toast["timer"] > 0:
+                still_alive.append(toast)
+        self.ach_toasts = still_alive
+
+        # Draw from bottom up (newest at bottom, oldest at top)
+        for i, toast in enumerate(reversed(self.ach_toasts)):
+            slot_y = SH - MARGIN_B - TOAST_H - i * (TOAST_H + TOAST_GAP)
+            if slot_y < 0:
+                break   # too many toasts, skip offscreen ones
+
+            t      = toast["timer"]
+            t_max  = toast["max_timer"]
+            cat    = toast["cat"]
+
+            # Slide in from the right
+            slide_prog = min(1.0, (t_max - t) / SLIDE_FRAMES)
+            slide_off  = int((1.0 - slide_prog) * (TOAST_W + MARGIN_R))
+
+            # Fade out near end
+            if t <= FADE_FRAMES:
+                alpha = int(255 * (t / FADE_FRAMES))
+            else:
+                alpha = 255
+
+            tx = SW - MARGIN_R - TOAST_W + slide_off   # negative = off-screen right
+            ty = slot_y
+
+            # Accent colour by category
+            CAT_COLS = {
+                "bosses":    (255, 100, 60),
+                "levels":    (80, 200, 255),
+                "waves":     (80, 220, 140),
+                "kills":     (220, 80, 80),
+                "cosmetics": (200, 140, 255),
+                "weapons":   (255, 200, 60),
+                "hardcore":  (255, 60, 40),
+                "meta":      (255, 215, 0),
+            }
+            accent = CAT_COLS.get(cat, (180, 180, 255))
+
+            # Background panel
+            panel = pygame.Surface((TOAST_W, TOAST_H), pygame.SRCALPHA)
+            bg_col = (18, 14, 28, min(alpha, 220))
+            pygame.draw.rect(panel, bg_col, (0, 0, TOAST_W, TOAST_H), border_radius=10)
+            # Accent left bar
+            bar_a = min(alpha, 255)
+            pygame.draw.rect(panel, (*accent, bar_a), (0, 0, 4, TOAST_H), border_radius=3)
+            # Border
+            pygame.draw.rect(panel, (*accent, bar_a), (0, 0, TOAST_W, TOAST_H), 1, border_radius=10)
+            self.screen.blit(panel, (tx, ty))
+
+            # "Achievement Unlocked!" header
+            header_surf = self.fonts["tiny"].render("Achievement Unlocked!", True,
+                                                     tuple(min(255, c) for c in accent))
+            header_surf.set_alpha(alpha)
+            self.screen.blit(header_surf, (tx + 12, ty + 7))
+
+            # Achievement name
+            name_surf = self.fonts["small"].render(toast["name"], True, WHITE)
+            name_surf.set_alpha(alpha)
+            self.screen.blit(name_surf, (tx + 12, ty + 24))
+
+            # Token reward — drawn right-aligned
+            tok_text = f"+{toast['tokens']}"
+            tok_surf = self.fonts["small"].render(tok_text, True, (255, 200, 60))
+            tok_surf.set_alpha(alpha)
+            tok_x = tx + TOAST_W - tok_surf.get_width() - ICON_SIZE * 2 - 10
+            self.screen.blit(tok_surf, (tok_x, ty + TOAST_H // 2 - tok_surf.get_height() // 2))
+            # Coin icon next to token count
+            draw_token_coin(self.screen,
+                            tx + TOAST_W - ICON_SIZE - 8,
+                            ty + TOAST_H // 2,
+                            ICON_SIZE)
+
     def draw_hud(self):
         p = self.player
 
@@ -7952,6 +9569,8 @@ class Game:
     # ── main loop ─────────────────────────────────────────────────────────────
 
     def run(self):
+        import __main__
+        __main__._live_game = self   # lets Profile.unlock sync cosmetics immediately
         while True:
             self.clock.tick(FPS)
             mx, my = pygame.mouse.get_pos()
@@ -8005,49 +9624,52 @@ class Game:
                     continue
 
                 if self.paused and self.pause_dev:
+                    if event.type == pygame.MOUSEWHEEL and self.dev_ach_expand:
+                        self.dev_ach_scroll = max(0, self.dev_ach_scroll - event.y * 30)
                     if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                         px2, py2 = event.pos
-                        DPX = SW // 2 - 170; DPY = SH // 2 - 80
-                        DPW = 340
-                        DPH = 368   # fixed height — 5 buttons
-                        gold_rect  = pygame.Rect(DPX + 20, DPY + 70,  DPW - 40, 44)
-                        lvl_rect   = pygame.Rect(DPX + 20, DPY + 126, DPW - 40, 44)
-                        skip_rect  = pygame.Rect(DPX + 20, DPY + 182, DPW - 40, 44)
-                        boss_rect  = pygame.Rect(DPX + 20, DPY + 238, DPW - 40, 44)
-                        perk_rect  = pygame.Rect(DPX + 20, DPY + 294, DPW - 40, 44)
-                        # Boss flyout — to the right
+                        DPX = SW // 2 - 170; DPY = SH // 2 - 110
+                        DPW = 340;           DPH = 424   # 6 buttons
+                        ROW_H = 56
+                        gold_rect  = pygame.Rect(DPX + 20, DPY + 70 + ROW_H * 0, DPW - 40, 44)
+                        lvl_rect   = pygame.Rect(DPX + 20, DPY + 70 + ROW_H * 1, DPW - 40, 44)
+                        skip_rect  = pygame.Rect(DPX + 20, DPY + 70 + ROW_H * 2, DPW - 40, 44)
+                        boss_rect  = pygame.Rect(DPX + 20, DPY + 70 + ROW_H * 3, DPW - 40, 44)
+                        perk_rect  = pygame.Rect(DPX + 20, DPY + 70 + ROW_H * 4, DPW - 40, 44)
+                        ach_rect2  = pygame.Rect(DPX + 20, DPY + 70 + ROW_H * 5, DPW - 40, 44)
+                        # Boss flyout — right
                         FLY_W = 220; FLY_X = DPX + DPW + 8; FLY_Y = DPY
                         FLY_H = 20 + len(BOSS_TYPES) * 34 + 8
-                        # Perk flyout — to the left
+                        # Perk flyout — left
                         PKW = 220; PKX = DPX - PKW - 8; PKY = DPY
                         PKH = 20 + len(ALL_PERKS) * 34 + 8
+                        # Achievement flyout — right (wider, scrollable)
+                        ACH_W = 340; ACH_X = DPX + DPW + 8; ACH_Y = DPY
+                        ACH_VISIBLE_H = 440; ACH_ROW = 32
+                        ACH_H = ACH_VISIBLE_H
                         if gold_rect.collidepoint(px2, py2):
-                            self.player.gold += 100
-                            continue
+                            self.player.gold += 100; continue
                         if lvl_rect.collidepoint(px2, py2):
                             self.player.level += 1
-                            self.player.max_hp = int(
-                                (100 + self.player.level * 15) *
-                                (1 + self.player.perk("max_hp_pct")))
+                            self.player.max_hp = int((100 + self.player.level * 15) *
+                                                     (1 + self.player.perk("max_hp_pct")))
                             self.player.hp = min(self.player.hp, self.player.max_hp)
                             self.player.xp_to_next = self.player.xp_for_level(self.player.level)
-                            self.player.xp = 0
-                            continue
+                            self.player.xp = 0; continue
                         if skip_rect.collidepoint(px2, py2):
-                            self._skip_wave()
-                            self.pause_dev = False
-                            self.paused    = False
-                            self.dev_boss_expand = False
-                            self.dev_perk_expand = False
+                            self._skip_wave(); self.pause_dev = False; self.paused = False
+                            self.dev_boss_expand = self.dev_perk_expand = self.dev_ach_expand = False
                             continue
                         if boss_rect.collidepoint(px2, py2):
                             self.dev_boss_expand = not self.dev_boss_expand
-                            self.dev_perk_expand = False
-                            continue
+                            self.dev_perk_expand = self.dev_ach_expand = False; continue
                         if perk_rect.collidepoint(px2, py2):
                             self.dev_perk_expand = not self.dev_perk_expand
-                            self.dev_boss_expand = False
-                            continue
+                            self.dev_boss_expand = self.dev_ach_expand = False; continue
+                        if ach_rect2.collidepoint(px2, py2):
+                            self.dev_ach_expand  = not self.dev_ach_expand
+                            self.dev_boss_expand = self.dev_perk_expand = False
+                            self.dev_ach_scroll  = 0; continue
                         # Boss flyout buttons
                         if self.dev_boss_expand:
                             for bi, bt in enumerate(BOSS_TYPES):
@@ -8055,9 +9677,7 @@ class Game:
                                 if boss_btn.collidepoint(px2, py2):
                                     self._skip_to_boss(bi)
                                     self.dev_boss_expand = False
-                                    self.pause_dev = False
-                                    self.paused    = False
-                                    continue
+                                    self.pause_dev = False; self.paused = False; continue
                         # Perk flyout buttons
                         if self.dev_perk_expand:
                             for pi, pd in enumerate(ALL_PERKS):
@@ -8067,22 +9687,32 @@ class Game:
                                         self.player.perks.get(pd["key"], 0) + pd["bonus"])
                                     self.floating_texts.append(
                                         FloatingText(self.player.x, self.player.y - 60,
-                                                     f"[DEV] +{pd['label']}!", pd["color"], 20))
-                                    continue
+                                                     f"[DEV] +{pd['label']}!", pd["color"], 20)); continue
+                        # Achievement flyout buttons
+                        if self.dev_ach_expand:
+                            if ACH_X <= px2 <= ACH_X + ACH_W and ACH_Y <= py2 <= ACH_Y + ACH_H:
+                                row_y_base = ACH_Y + 24
+                                for ai, ach in enumerate(ACHIEVEMENTS):
+                                    ry = row_y_base + ai * ACH_ROW - self.dev_ach_scroll
+                                    if ry + ACH_ROW < ACH_Y or ry > ACH_Y + ACH_H:
+                                        continue
+                                    ab = pygame.Rect(ACH_X + 6, ry, ACH_W - 12, ACH_ROW - 4)
+                                    if ab.collidepoint(px2, py2):
+                                        if PROFILE.unlock(ach["id"]):
+                                            self._queue_achievement_toasts([ach["id"]])
+                                            self.floating_texts.append(
+                                                FloatingText(self.player.x, self.player.y - 80,
+                                                             f"[DEV] Achievement granted!", (255, 200, 60), 20))
+                                        continue
                         # Close if clicked outside all panels
-                        in_main  = DPX <= px2 <= DPX + DPW and DPY <= py2 <= DPY + DPH
-                        in_boss  = (self.dev_boss_expand and
-                                    FLY_X <= px2 <= FLY_X + FLY_W and FLY_Y <= py2 <= FLY_Y + FLY_H)
-                        in_perk  = (self.dev_perk_expand and
-                                    PKX <= px2 <= PKX + PKW and PKY <= py2 <= PKY + PKH)
-                        if not (in_main or in_boss or in_perk):
-                            self.pause_dev = False
-                            self.dev_boss_expand = False
-                            self.dev_perk_expand = False
+                        in_main = DPX <= px2 <= DPX + DPW and DPY <= py2 <= DPY + DPH
+                        in_boss = self.dev_boss_expand and FLY_X <= px2 <= FLY_X + FLY_W and FLY_Y <= py2 <= FLY_Y + FLY_H
+                        in_perk = self.dev_perk_expand and PKX <= px2 <= PKX + PKW and PKY <= py2 <= PKY + PKH
+                        in_ach  = self.dev_ach_expand  and ACH_X <= px2 <= ACH_X + ACH_W and ACH_Y <= py2 <= ACH_Y + ACH_H
+                        if not (in_main or in_boss or in_perk or in_ach):
+                            self.pause_dev = self.dev_boss_expand = self.dev_perk_expand = self.dev_ach_expand = False
                     if event.type == pygame.KEYDOWN and event.key in (pygame.K_ESCAPE, pygame.K_p):
-                        self.pause_dev = False
-                        self.dev_boss_expand = False
-                        self.dev_perk_expand = False
+                        self.pause_dev = self.dev_boss_expand = self.dev_perk_expand = self.dev_ach_expand = False
                     continue
                 # Settings slider drag while paused
                 if self.paused and self.pause_settings:
@@ -8230,8 +9860,8 @@ class Game:
                     vign.fill((0, 0, 0, vign_alpha))
                     self.screen.blit(vign, (0, 0))
                 self.draw_hud()
+                self.draw_achievement_toasts()
                 _scaled_flip(self.screen)
-                # When animation ends, trigger game over
                 if self.death_anim_timer == 0:
                     self.game_over = True
                     active_lb = self.leaderboard_hc if self.hardcore else self.leaderboard
@@ -8249,6 +9879,24 @@ class Game:
                 self.draw_game_over()
                 _scaled_flip(self.screen)
                 continue
+
+            # ── Cosmetic achievement checks run every frame (even while paused/shop open) ─
+            # This ensures buying a cosmetic in the shop immediately fires the achievement.
+            oc = TOKENS.owned_cosmetics
+            cosm_ach_map = [("wings","cosm_wings"),("blackhole","cosm_blackhole"),
+                            ("hexweaver","cosm_hexweaver"),("lavalord","cosm_lavalord"),
+                            ("ironhide","cosm_ironhide")]
+            all_cosm_ids = {c["id"] for c in COSMETICS}
+            _cosm_new = []
+            for cosm_id, aid in cosm_ach_map:
+                if cosm_id in oc and aid not in PROFILE.unlocked:
+                    if PROFILE.unlock(aid):
+                        _cosm_new.append(aid)
+            if all_cosm_ids <= oc and "cosm_all" not in PROFILE.unlocked:
+                if PROFILE.unlock("cosm_all"):
+                    _cosm_new.append("cosm_all")
+            if _cosm_new:
+                self._queue_achievement_toasts(_cosm_new)
 
             if not self.shop.open and not self.perk_screen.active and not self.paused:
                 # ── Flush deferred save (triggered after wave clear / boss kill) ─
@@ -8299,6 +9947,15 @@ class Game:
                             self.elite_wave = False
                             if self.wave % 5 == 0 and self.wave % 10 != 0:
                                 self.perk_screen.offer()
+                            # 2% chance to drop a case on wave clear
+                            if random.random() < 0.02:
+                                TOKENS.add_case()
+                                self.floating_texts.append(
+                                    FloatingText(self.player.x, self.player.y - 110,
+                                                 "Case dropped! Check Inventory.", (255, 200, 40), 20))
+                            # Check level/kill/cosmetic achievements at every wave clear
+                            new_achs = PROFILE.check_achievements(self)
+                            self._queue_achievement_toasts(new_achs)
                             # Defer save until after perk screen (if open) or immediately
                             self.pending_save = True
                 else:
@@ -9170,18 +10827,16 @@ class Game:
                     self.screen.blit(hint_p, (PPX + PPW // 2 - hint_p.get_width() // 2, PPY + PPH - 24))
 
                 if self.pause_dev:
-                    DPX = SW // 2 - 170; DPY = SH // 2 - 80
-                    DPW = 340
-                    DPH = 368   # fixed — 5 buttons
+                    DPX = SW // 2 - 170; DPY = SH // 2 - 110
+                    DPW = 340;           DPH = 424
                     DEV_COL = (255, 160, 40)
+                    ROW_H   = 56
 
-                    pygame.draw.rect(self.screen, PANEL,    (DPX, DPY, DPW, DPH), border_radius=14)
-                    pygame.draw.rect(self.screen, DEV_COL,  (DPX, DPY, DPW, DPH), 2, border_radius=14)
-
+                    pygame.draw.rect(self.screen, PANEL,   (DPX, DPY, DPW, DPH), border_radius=14)
+                    pygame.draw.rect(self.screen, DEV_COL, (DPX, DPY, DPW, DPH), 2, border_radius=14)
                     dtitle = self.fonts["large"].render("Dev Tools", True, DEV_COL)
                     self.screen.blit(dtitle, (DPX + DPW // 2 - dtitle.get_width() // 2, DPY + 14))
-                    pygame.draw.line(self.screen, (70, 55, 30),
-                                     (DPX + 16, DPY + 50), (DPX + DPW - 16, DPY + 50), 1)
+                    pygame.draw.line(self.screen, (70, 55, 30), (DPX + 16, DPY + 50), (DPX + DPW - 16, DPY + 50), 1)
 
                     if self.wave_active and self.boss_wave:
                         wave_hint = f"Boss wave {self.wave}"
@@ -9197,17 +10852,20 @@ class Game:
                     skip_col  = (255, 100, 100)
                     boss_col  = (255, 120, 200)
                     perk_col  = (100, 220, 140)
+                    ach_col2  = (180, 120, 255)
                     next_wave = self.wave + 1 if not self.wave_active else self.wave
                     boss_label = "▸ Skip to Boss ◂" if self.dev_boss_expand else "▸ Skip to Boss Wave"
                     perk_label = "◂ Give Perk ▸"    if self.dev_perk_expand else "▸ Give Perk"
-                    for label, val_str, col, row in [
-                        ("+100 Gold",   f"Current: {self.player.gold}g",      YELLOW,   0),
-                        ("+1 Level",    f"Current: Lvl {self.player.level}",  CYAN,     1),
-                        ("Skip Wave",   f">> Wave {next_wave}",               skip_col, 2),
-                        (boss_label,    "→ right panel",                      boss_col, 3),
-                        (perk_label,    "← left panel",                       perk_col, 4),
-                    ]:
-                        btn = pygame.Rect(DPX + 20, DPY + 70 + row * 56, DPW - 40, 44)
+                    ach_label  = "Achievements ◂"   if self.dev_ach_expand  else "▸ Grant Achievement"
+                    for row, (label, val_str, col) in enumerate([
+                        ("+100 Gold",   f"Current: {self.player.gold}g",     YELLOW),
+                        ("+1 Level",    f"Current: Lvl {self.player.level}", CYAN),
+                        ("Skip Wave",   f">> Wave {next_wave}",              skip_col),
+                        (boss_label,    "→ right panel",                     boss_col),
+                        (perk_label,    "← left panel",                      perk_col),
+                        (ach_label,     "→ right panel",                     ach_col2),
+                    ]):
+                        btn = pygame.Rect(DPX + 20, DPY + 70 + row * ROW_H, DPW - 40, 44)
                         pygame.draw.rect(self.screen, lerp_color(PANEL, col, 0.22), btn, border_radius=8)
                         pygame.draw.rect(self.screen, col, btn, 1, border_radius=8)
                         bl = self.fonts["med"].render(label, True, col)
@@ -9216,54 +10874,80 @@ class Game:
                         self.screen.blit(vl, (btn.right - vl.get_width() - 14,
                                               btn.centery - vl.get_height() // 2))
 
-                    # ── Boss flyout — to the RIGHT ────────────────────────────
+                    # ── Boss flyout — RIGHT ──────────────────────────────────
                     if self.dev_boss_expand:
                         FLY_W = 220; FLY_X = DPX + DPW + 8; FLY_Y = DPY
                         FLY_H = 20 + len(BOSS_TYPES) * 34 + 8
-                        pygame.draw.rect(self.screen, PANEL,   (FLY_X, FLY_Y, FLY_W, FLY_H), border_radius=10)
-                        pygame.draw.rect(self.screen, boss_col,(FLY_X, FLY_Y, FLY_W, FLY_H), 1, border_radius=10)
+                        pygame.draw.rect(self.screen, PANEL,    (FLY_X, FLY_Y, FLY_W, FLY_H), border_radius=10)
+                        pygame.draw.rect(self.screen, boss_col, (FLY_X, FLY_Y, FLY_W, FLY_H), 1, border_radius=10)
                         fh = self.fonts["tiny"].render("Select Boss", True, boss_col)
                         self.screen.blit(fh, (FLY_X + FLY_W // 2 - fh.get_width() // 2, FLY_Y + 4))
-                        boss_colors = [
-                            (220, 60, 60), (200, 80, 255), (80, 180, 80),
-                            (255, 220, 60), (80, 80, 220),
-                        ]
+                        boss_colors = [(220,60,60),(200,80,255),(80,180,80),(255,220,60),(80,80,220)]
                         for bi, bt in enumerate(BOSS_TYPES):
-                            bcol     = boss_colors[bi % len(boss_colors)]
-                            boss_btn = pygame.Rect(FLY_X + 8, FLY_Y + 20 + bi * 34, FLY_W - 16, 28)
-                            pygame.draw.rect(self.screen, lerp_color(PANEL, bcol, 0.18), boss_btn, border_radius=6)
-                            pygame.draw.rect(self.screen, bcol, boss_btn, 1, border_radius=6)
+                            bcol = boss_colors[bi % len(boss_colors)]
+                            bb   = pygame.Rect(FLY_X + 8, FLY_Y + 20 + bi * 34, FLY_W - 16, 28)
+                            pygame.draw.rect(self.screen, lerp_color(PANEL, bcol, 0.18), bb, border_radius=6)
+                            pygame.draw.rect(self.screen, bcol, bb, 1, border_radius=6)
                             bn = self.fonts["small"].render(bt["name"], True, bcol)
-                            self.screen.blit(bn, (boss_btn.x + 8,
-                                                   boss_btn.centery - bn.get_height() // 2))
+                            self.screen.blit(bn, (bb.x + 8, bb.centery - bn.get_height() // 2))
 
-                    # ── Perk flyout — to the LEFT ─────────────────────────────
+                    # ── Perk flyout — LEFT ───────────────────────────────────
                     if self.dev_perk_expand:
                         PKW = 220; PKX = DPX - PKW - 8; PKY = DPY
                         PKH = 20 + len(ALL_PERKS) * 34 + 8
-                        pygame.draw.rect(self.screen, PANEL,   (PKX, PKY, PKW, PKH), border_radius=10)
-                        pygame.draw.rect(self.screen, perk_col,(PKX, PKY, PKW, PKH), 1, border_radius=10)
+                        pygame.draw.rect(self.screen, PANEL,    (PKX, PKY, PKW, PKH), border_radius=10)
+                        pygame.draw.rect(self.screen, perk_col, (PKX, PKY, PKW, PKH), 1, border_radius=10)
                         ph = self.fonts["tiny"].render("Give Perk (stackable)", True, perk_col)
                         self.screen.blit(ph, (PKX + PKW // 2 - ph.get_width() // 2, PKY + 4))
                         for pi, pd in enumerate(ALL_PERKS):
-                            pcol     = pd["color"]
-                            perk_btn = pygame.Rect(PKX + 8, PKY + 20 + pi * 34, PKW - 16, 28)
-                            pygame.draw.rect(self.screen, lerp_color(PANEL, pcol, 0.18), perk_btn, border_radius=6)
-                            pygame.draw.rect(self.screen, pcol, perk_btn, 1, border_radius=6)
+                            pcol = pd["color"]
+                            pb   = pygame.Rect(PKX + 8, PKY + 20 + pi * 34, PKW - 16, 28)
+                            pygame.draw.rect(self.screen, lerp_color(PANEL, pcol, 0.18), pb, border_radius=6)
+                            pygame.draw.rect(self.screen, pcol, pb, 1, border_radius=6)
                             pn = self.fonts["small"].render(pd["label"], True, pcol)
-                            self.screen.blit(pn, (perk_btn.x + 8,
-                                                   perk_btn.centery - pn.get_height() // 2))
+                            self.screen.blit(pn, (pb.x + 8, pb.centery - pn.get_height() // 2))
                             cur_val = self.player.perks.get(pd["key"], 0)
                             if cur_val > 0:
-                                stacks = round(cur_val / pd["bonus"])
-                                sv = self.fonts["tiny"].render(f"×{stacks}", True, GRAY)
-                                self.screen.blit(sv, (perk_btn.right - sv.get_width() - 8,
-                                                       perk_btn.centery - sv.get_height() // 2))
+                                sv = self.fonts["tiny"].render(f"×{round(cur_val/pd['bonus'])}", True, GRAY)
+                                self.screen.blit(sv, (pb.right - sv.get_width() - 8,
+                                                       pb.centery - sv.get_height() // 2))
+
+                    # ── Achievement flyout — RIGHT (scrollable) ──────────────
+                    if self.dev_ach_expand:
+                        ACH_W = 340; ACH_X = DPX + DPW + 8; ACH_Y = DPY
+                        ACH_VISIBLE_H = 440; ACH_ROW = 32
+                        pygame.draw.rect(self.screen, PANEL,    (ACH_X, ACH_Y, ACH_W, ACH_VISIBLE_H), border_radius=10)
+                        pygame.draw.rect(self.screen, ach_col2, (ACH_X, ACH_Y, ACH_W, ACH_VISIBLE_H), 1, border_radius=10)
+                        ah = self.fonts["tiny"].render("Click to grant achievement", True, ach_col2)
+                        self.screen.blit(ah, (ACH_X + ACH_W // 2 - ah.get_width() // 2, ACH_Y + 6))
+                        # Clamp scroll
+                        max_ach_scroll = max(0, len(ACHIEVEMENTS) * ACH_ROW - (ACH_VISIBLE_H - 24))
+                        self.dev_ach_scroll = max(0, min(self.dev_ach_scroll, max_ach_scroll))
+                        # Clipping surface
+                        ach_clip = pygame.Surface((ACH_W, ACH_VISIBLE_H - 24), pygame.SRCALPHA)
+                        ach_clip.fill((0, 0, 0, 0))
+                        for ai, ach in enumerate(ACHIEVEMENTS):
+                            ry  = ai * ACH_ROW - self.dev_ach_scroll
+                            if ry + ACH_ROW < 0 or ry > ACH_VISIBLE_H - 24:
+                                continue
+                            done = ach["id"] in PROFILE.unlocked
+                            ac   = (80, 200, 80) if done else ach_col2
+                            ab   = pygame.Rect(6, ry, ACH_W - 12, ACH_ROW - 4)
+                            pygame.draw.rect(ach_clip, lerp_color(PANEL, ac, 0.3 if done else 0.12), ab, border_radius=5)
+                            pygame.draw.rect(ach_clip, ac, ab, 1, border_radius=5)
+                            an = self.fonts["tiny"].render(ach["name"], True, WHITE if done else (180, 180, 200))
+                            ach_clip.blit(an, (ab.x + 6, ab.centery - an.get_height() // 2))
+                            if done:
+                                pygame.draw.line(ach_clip, (80,200,80), (ab.right-22, ry+ACH_ROW//2-4),
+                                                 (ab.right-16, ry+ACH_ROW//2+2), 2)
+                                pygame.draw.line(ach_clip, (80,200,80), (ab.right-16, ry+ACH_ROW//2+2),
+                                                 (ab.right-8,  ry+ACH_ROW//2-6), 2)
+                        self.screen.blit(ach_clip, (ACH_X, ACH_Y + 24))
 
                     close_d = self.fonts["tiny"].render(
                         "Click outside or press P / ESC to close", True, GRAY)
-                    self.screen.blit(close_d, (DPX + DPW // 2 - close_d.get_width() // 2,
-                                               DPY + DPH - 22))
+                    self.screen.blit(close_d, (DPX + DPW // 2 - close_d.get_width() // 2, DPY + DPH - 22))
+
 
             # ── Corruption wave screen flash ───────────────────────────────────
             if self.corruption_flash_timer > 0:
@@ -9290,10 +10974,8 @@ class Game:
                     ctitle.set_alpha(banner_alpha)
                     self.screen.blit(ctitle, (SW // 2 - ctitle.get_width() // 2, by2 + 14))
 
+            self.draw_achievement_toasts()
             _scaled_flip(self.screen)
-
-
-# ── Entry point ───────────────────────────────────────────────────────────────
 
 def apply_display_mode(current_window):
     """
@@ -9324,7 +11006,7 @@ def apply_display_mode(current_window):
 
 if __name__ == "__main__":
     _window = apply_display_mode(None)
-    pygame.display.set_caption("Dungeon Crawler 44.0b12")
+    pygame.display.set_caption("Dungeon Crawler 45.0b10")
 
     # Window icon
     _icon_path = asset("icon.png")
@@ -9342,9 +11024,13 @@ if __name__ == "__main__":
         "tiny":  _make_font(13),
         "huge":  _make_font(48, bold=True),
     }
+
+    # Show profile creation screen on first launch (no profile yet)
+    if not PROFILE.exists():
+        _screen = pygame.display.get_surface()
+        profile_creation_screen(_screen, _clock, _fonts)
+
     while True:
-        # With pygame.SCALED active, the display surface is the 1280×720 logical
-        # canvas — draw directly to it so SCALED's mouse remapping works correctly.
         _screen = pygame.display.get_surface()
         chosen_name, chosen_cp, chosen_slot, chosen_hardcore = username_screen(_screen, _clock, _fonts)
 
