@@ -59,10 +59,19 @@ def asset(filename):
     return os.path.join(ASSET_DIR, "assets", filename)
 
 def _make_font(size, bold=False):
-    """Return a monospace SysFont that works on Windows and macOS.
-    Tries Consolas (Windows) → Menlo (macOS) → Courier New → DejaVu Sans Mono."""
-    return pygame.font.SysFont(
-        "consolas, menlo, couriernew, dejavusansmono", size, bold=bold)
+    """Return the best available SysFont for the current platform.
+    On macOS prefers Helvetica Neue (clean, native-feeling, wide glyph coverage).
+    Falls back through a chain that works on Windows and Linux too."""
+    import sys as _sys
+    if _sys.platform == "darwin":
+        # macOS: Helvetica Neue is the cleanest UI font; fall back to Arial then DejaVu
+        candidates = "helveticaneue, helvetica, arial, dejavusans"
+    else:
+        # Windows / Linux: Segoe UI is the closest match to Helvetica Neue on Windows —
+        # same humanist proportions, clean strokes, excellent screen legibility.
+        # Calibri is a warm fallback; Trebuchet MS covers older systems.
+        candidates = "segoeui, calibri, trebuchetms, arial, dejavusans"
+    return pygame.font.SysFont(candidates, size, bold=bold)
 
 # ── Music manager ─────────────────────────────────────────────────────────────
 
@@ -656,7 +665,7 @@ GREEN  = (50, 200, 80);  BLUE   = (50, 120, 220); YELLOW = (255, 215, 0)
 ORANGE = (255, 140, 0);  PURPLE = (160, 50, 200); CYAN   = (0, 200, 220)
 GRAY   = (100, 100, 110); DARK  = (18, 18, 28);   PANEL  = (28, 28, 42)
 WAVE_BREAK_SECS = 10
-GAME_VERSION    = "45.0b16"
+GAME_VERSION    = "45.0b21"
 
 # ── Achievement definitions ──────────────────────────────────────────────────
 # cat: "bosses"|"levels"|"waves"|"kills"|"cosmetics"|"weapons"|"hardcore"|"meta"
@@ -972,11 +981,26 @@ def _fetch_latest_release():
     print(f"[VersionCheck] Starting check — current version: {GAME_VERSION}")
     print(f"[VersionCheck] Fetching: {_GH_API_URL}")
     try:
+        import ssl as _ssl
+        # macOS ships Python without system CA certs; build a context that works
+        # Try certifi first (installed via pip), then fall back to unverified.
+        try:
+            import certifi as _certifi
+            _ctx = _ssl.create_default_context(cafile=_certifi.where())
+            print("[VersionCheck] SSL: using certifi CA bundle")
+        except ImportError:
+            try:
+                _ctx = _ssl.create_default_context()
+                print("[VersionCheck] SSL: using system CA bundle")
+            except Exception:
+                _ctx = _ssl._create_unverified_context()
+                print("[VersionCheck] SSL: WARNING — unverified context (no CA bundle found)")
+
         req = urllib.request.Request(
             _GH_API_URL,
             headers={"User-Agent": "DungeonCrawlerVersionCheck/1.0"}
         )
-        with urllib.request.urlopen(req, timeout=5) as resp:
+        with urllib.request.urlopen(req, timeout=5, context=_ctx) as resp:
             status = resp.status
             print(f"[VersionCheck] HTTP {status} — response received")
             raw  = resp.read().decode()
@@ -1338,6 +1362,7 @@ CREDITS = {
         "freesound.org - mokasza - fast-whoosh",
         "freesound.org - j1987 - spinning_firework_2",
         "pixabay.com - xg7ssi08yr - laser",
+        "pixabay.com - Universfield - Level Up 03"
     ],
     "Playtesters": [
         "kayleigh1w1",
@@ -5618,8 +5643,8 @@ class Shop:
         prev_rect = pygame.Rect(px + 16,             nav_y, btn_w, btn_h)
         next_rect = pygame.Rect(px + pw - 16 - btn_w, nav_y, btn_w, btn_h)
         for rect, label, enabled in [
-            (prev_rect, "◄ Prev", self.weap_page > 0),
-            (next_rect, "Next ►", self.weap_page < total_pages - 1),
+            (prev_rect, "< Prev", self.weap_page > 0),
+            (next_rect, "Next >", self.weap_page < total_pages - 1),
         ]:
             col = CYAN if enabled else (50, 50, 70)
             bg  = lerp_color(PANEL, col, 0.15) if enabled else PANEL
@@ -5652,7 +5677,7 @@ class Shop:
         self._heal_rect = pygame.Rect(px + 16, heal_row_y, pw - 32, 34)
 
         hint = fonts["small"].render(
-            "[Q]Weapons [R]Cosmetics [T]Titles  |  UP/DOWN  |  ◄/► page  |  [B]buy [E]equip [H]heal  |  [TAB]close",
+            "[Q]Weapons [R]Cosmetics [T]Titles  |  UP/DOWN  |  </> page  |  [B]buy [E]equip [H]heal  |  [TAB]close",
             True, GRAY)
         surf.blit(hint, (px + pw // 2 - hint.get_width() // 2, py + ph - 28))
 
@@ -5773,8 +5798,8 @@ class Shop:
         next_rect = pygame.Rect(px + pw - 16 - btn_w, nav_y, btn_w, btn_h)
 
         for rect, label, enabled in [
-            (prev_rect, "◄ Prev", self.cosm_page > 0),
-            (next_rect, "Next ►", self.cosm_page < total_pages - 1),
+            (prev_rect, "< Prev", self.cosm_page > 0),
+            (next_rect, "Next >", self.cosm_page < total_pages - 1),
         ]:
             col = CYAN if enabled else (50, 50, 70)
             bg  = lerp_color(PANEL, col, 0.15) if enabled else PANEL
@@ -5796,7 +5821,7 @@ class Shop:
         surf.blit(bal_s, (px + pw // 2 - bal_s.get_width() // 2, bal_y + 9))
 
         hint = fonts["small"].render(
-            "[Q]Weapons [R]Cosmetics [T]Titles  |  UP/DOWN  |  ◄/► page  |  [B]buy [E]equip  |  [TAB]close", True, GRAY)
+            "[Q]Weapons [R]Cosmetics [T]Titles  |  UP/DOWN  |  </> page  |  [B]buy [E]equip  |  [TAB]close", True, GRAY)
         surf.blit(hint, (px + pw // 2 - hint.get_width() // 2, py + ph - 28))
 
     def _draw_titles(self, surf, player, fonts, px, py, pw, ph):
@@ -5867,8 +5892,8 @@ class Shop:
             self._title_prev_rect = pygame.Rect(px + 20, nav_y, 120, 32)
             self._title_next_rect = pygame.Rect(px + pw - 140, nav_y, 120, 32)
             for rrect, label, enabled in [
-                (self._title_prev_rect, "◄ Prev", self.title_page > 0),
-                (self._title_next_rect, "Next ►", self.title_page < total_pages - 1),
+                (self._title_prev_rect, "< Prev", self.title_page > 0),
+                (self._title_next_rect, "Next >", self.title_page < total_pages - 1),
             ]:
                 col2 = TIT_COL if enabled else GRAY
                 pygame.draw.rect(surf, lerp_color(PANEL, col2, 0.15), rrect, border_radius=8)
@@ -6147,7 +6172,7 @@ class PerkScreen:
     _entry_t       = 0.0                # 0→1, card entry animation progress
 
     # Unique icon symbol per perk (matches ALL_PERKS order)
-    _ICONS = ["⚔", "🛡", "⚡", "❤", "💪", "💰", "🎯", "🔥", "💨"]
+    _ICONS = ["ATK", "DEF", "SPD", "HP", "STR", "GOLD", "AIM", "FIRE", "DASH"]
 
     def __init__(self, player, fonts):
         self.player  = player
@@ -6372,7 +6397,7 @@ class PerkScreen:
         pygame.draw.ellipse(glow_surf, (*YELLOW, 18), (0, 0, 500, 70))
         surf.blit(glow_surf, (SW // 2 - 250, title_y - 10))
 
-        title = self.fonts["huge"].render("✦  CHOOSE A PERK  ✦", True, title_col)
+        title = self.fonts["huge"].render("** CHOOSE A PERK **", True, title_col)
         surf.blit(title, (SW // 2 - title.get_width() // 2, title_y))
 
         sub = self.fonts["small"].render("Click a card  ·  or press  1 / 2 / 3", True, (130, 130, 150))
@@ -6519,7 +6544,7 @@ class PerkScreen:
 
             # Stack label
             if stacks > 0:
-                st_label = self.fonts["tiny"].render(f"Owned: {stacks}×", True,
+                st_label = self.fonts["tiny"].render(f"Owned: {stacks}x", True,
                                                      lerp_color((100, 100, 115), col, 0.6))
                 surf.blit(st_label, (icon_cx - st_label.get_width() // 2, pip_y + 10))
 
@@ -6662,21 +6687,46 @@ def profile_creation_screen(screen, clock, fonts):
     avatar_rect  = pygame.Rect(SW // 2 - 48, SH // 2 - 180, 96, 96)
 
     def _pick_image():
-        try:
-            import tkinter as tk
-            from tkinter import filedialog
-            root = tk.Tk()
-            root.withdraw()
-            root.wm_attributes("-topmost", True)
-            path = filedialog.askopenfilename(
-                title="Choose profile picture",
-                filetypes=[("Image files", "*.png *.jpg *.jpeg *.bmp *.gif"),
-                           ("All files", "*.*")],
-            )
-            root.destroy()
-            return path or ""
-        except Exception:
-            return ""
+        import sys as _sys
+        if _sys.platform == "darwin":
+            # On macOS, tkinter conflicts with SDL's AppKit ownership and causes
+            # NSInvalidArgumentException. Use osascript (AppleScript) instead —
+            # it runs in its own process and never touches the SDL run loop.
+            try:
+                import subprocess as _sp
+                script = (
+                    'tell application "System Events"\n'
+                    '  set f to choose file with prompt "Choose a profile picture:" '
+                    'of type {"public.image"}\n'
+                    '  return POSIX path of f\n'
+                    'end tell'
+                )
+                result = _sp.run(
+                    ["osascript", "-e", script],
+                    capture_output=True, text=True, timeout=60
+                )
+                path = result.stdout.strip()
+                return path if path and os.path.isfile(path) else ""
+            except Exception as e:
+                print(f"[ImagePicker] osascript failed: {e}")
+                return ""
+        else:
+            # Windows / Linux: tkinter file dialog is safe here
+            try:
+                import tkinter as tk
+                from tkinter import filedialog
+                root = tk.Tk()
+                root.withdraw()
+                root.wm_attributes("-topmost", True)
+                path = filedialog.askopenfilename(
+                    title="Choose profile picture",
+                    filetypes=[("Image files", "*.png *.jpg *.jpeg *.bmp *.gif"),
+                               ("All files", "*.*")],
+                )
+                root.destroy()
+                return path or ""
+            except Exception:
+                return ""
 
     while True:
         clock.tick(FPS)
@@ -7518,7 +7568,7 @@ def username_screen(screen, clock, fonts):
             ("btn_settings",  "Settings",         (140, 180, 255),  True),
             ("btn_credits",   "Credits",           (200, 160, 255),  True),
             ("btn_inventory", "Inventory",         (255, 160, 60),   True),
-            ("btn_extras",    "Extras  ▾",        (255, 200, 80),   True),
+            ("btn_extras",    "Extras  v",        (255, 200, 80),   True),
         ]
 
         btn_new_game  = pygame.Rect(MX, MY,                       MBW, MBH)
@@ -7636,7 +7686,7 @@ def username_screen(screen, clock, fonts):
                     # Empty slot in load mode — unclickable
                     pygame.draw.rect(screen, (25, 28, 40), sr, border_radius=8)
                     pygame.draw.rect(screen, (50, 50, 65), sr, 1, border_radius=8)
-                    empty_lbl = fonts["small"].render(f"Slot {slot_num}  —  Empty", True, (60, 60, 75))
+                    empty_lbl = fonts["small"].render(f"Slot {slot_num}  -  Empty", True, (60, 60, 75))
                     screen.blit(empty_lbl, (sr.x + 14, sr.centery - empty_lbl.get_height() // 2))
                 else:
                     hovered   = sr.collidepoint(mx_now, my_now)
@@ -7665,7 +7715,7 @@ def username_screen(screen, clock, fonts):
                         screen.blit(name_s, (sr.x + 14, sr.y + 7))
                         screen.blit(info_s, (sr.x + 14, sr.y + 30))
                     else:
-                        empty_s = fonts["med"].render(f"Slot {slot_num}  —  Empty", True, (130, 140, 160))
+                        empty_s = fonts["med"].render(f"Slot {slot_num}  -  Empty", True, (130, 140, 160))
                         screen.blit(empty_s, (sr.x + 14, sr.centery - empty_s.get_height() // 2))
 
             esc_hint = fonts["tiny"].render("ESC to go back", True, GRAY)
@@ -7681,7 +7731,7 @@ def username_screen(screen, clock, fonts):
         ]
         EX_H  = EX_BH * len(EX_items) + EX_GAP * (len(EX_items) - 1) + 16
         EX_X  = btn_extras.x
-        EX_Y  = btn_extras.bottom + 6
+        EX_Y  = btn_extras.top - EX_H - 6   # open upward so items never go off-screen
         ex_rects = []
         for i in range(len(EX_items)):
             ex_rects.append(pygame.Rect(EX_X, EX_Y + 8 + i * (EX_BH + EX_GAP), EX_W, EX_BH))
@@ -7745,7 +7795,7 @@ def username_screen(screen, clock, fonts):
         draw_bar(screen, tx, PW_Y + 46, xp_bar_w, 6,
                  xp_in_lvl, PROFILE.XP_PER_LEVEL, (140, 80, 255))
         xp_s = fonts["tiny"].render(f"{xp_in_lvl}/{PROFILE.XP_PER_LEVEL} XP", True, GRAY)
-        screen.blit(xp_s, (tx + xp_bar_w + 4, PW_Y + 42))
+        screen.blit(xp_s, (tx + xp_bar_w + 4, PW_Y + 46 + 3 - xp_s.get_height() // 2))
 
         # ── Rename overlay ────────────────────────────────────────────────────
         if show_rename:
@@ -7859,8 +7909,8 @@ def username_screen(screen, clock, fonts):
                     screen.blit(won_s, (IX + IW // 2 - won_s.get_width() // 2, res_y))
                     rar_res = fonts["med"].render(rarity_name, True, rarity_col)
                     screen.blit(rar_res, (IX + IW // 2 - rar_res.get_width() // 2, res_y + 36))
-                    screen.blit(fonts["small"].render("Click anywhere — item goes to inventory", True, GRAY),
-                                (IX + IW // 2 - fonts["small"].size("Click anywhere — item goes to inventory")[0] // 2,
+                    screen.blit(fonts["small"].render("Click anywhere - item goes to inventory", True, GRAY),
+                                (IX + IW // 2 - fonts["small"].size("Click anywhere - item goes to inventory")[0] // 2,
                                  IY + IH - 28))
                 else:
                     screen.blit(fonts["small"].render("Opening...", True, GRAY),
@@ -7929,8 +7979,8 @@ def username_screen(screen, clock, fonts):
                     nav_y2 = IY + IH - 36
                     inv_prev_rect = pygame.Rect(IX + 14, nav_y2, 90, 26)
                     inv_next_rect = pygame.Rect(IX + 112, nav_y2, 90, 26)
-                    for rr2, lbl2, en2 in [(inv_prev_rect, "◄ Prev", inv_page > 0),
-                                           (inv_next_rect, "Next ►", inv_page < total_pages - 1)]:
+                    for rr2, lbl2, en2 in [(inv_prev_rect, "< Prev", inv_page > 0),
+                                           (inv_next_rect, "Next >", inv_page < total_pages - 1)]:
                         c2 = INV_COL if en2 else (55, 55, 70)
                         pygame.draw.rect(screen, lerp_color(PANEL, c2, 0.18 if en2 else 0.05), rr2, border_radius=6)
                         pygame.draw.rect(screen, c2, rr2, 1, border_radius=6)
@@ -8188,7 +8238,7 @@ def username_screen(screen, clock, fonts):
 
             # Navigation hint
             hint_a = fonts["tiny"].render(
-                "◄/► or A/D — switch tabs   |   scroll or Up/Down — scroll list   |   click outside — close",
+                "</> or A/D - switch tabs   |   scroll or Up/Down - scroll list   |   click outside - close",
                 True, GRAY)
             screen.blit(hint_a, (AX + AW // 2 - hint_a.get_width() // 2, AY + AH - 22))
 
@@ -8220,18 +8270,18 @@ def username_screen(screen, clock, fonts):
             if lb_page == 1:
                 pygame.draw.rect(screen, lerp_color(PANEL, YELLOW, 0.2), btn_prev, border_radius=8)
                 pygame.draw.rect(screen, YELLOW, btn_prev, 1, border_radius=8)
-                pl = fonts["small"].render("◄ Normal", True, YELLOW)
+                pl = fonts["small"].render("< Normal", True, YELLOW)
                 screen.blit(pl, (btn_prev.centerx - pl.get_width() // 2,
                                   btn_prev.centery - pl.get_height() // 2))
             else:
                 pygame.draw.rect(screen, lerp_color(PANEL, (255, 100, 40), 0.2), btn_next, border_radius=8)
                 pygame.draw.rect(screen, (255, 100, 40), btn_next, 1, border_radius=8)
-                nl = fonts["small"].render("Hardcore ►", True, (255, 100, 40))
+                nl = fonts["small"].render("Hardcore >", True, (255, 100, 40))
                 screen.blit(nl, (btn_next.centerx - nl.get_width() // 2,
                                   btn_next.centery - nl.get_height() // 2))
 
             close_hint = fonts["tiny"].render(
-                "◄/► or A/D to switch pages  •  click outside or any other key to close", True, GRAY)
+                "</> or A/D to switch pages  -  click outside or any other key to close", True, GRAY)
             screen.blit(close_hint, (SW // 2 - close_hint.get_width() // 2, ly2 + lh2 - 18))
 
         # ── Patch notes overlay ───────────────────────────────────────────────
@@ -8575,18 +8625,18 @@ def username_screen(screen, clock, fonts):
                 pygame.draw.rect(screen, lerp_color(PANEL, (80, 200, 80), 0.25),
                                  prev_btn, border_radius=8)
                 pygame.draw.rect(screen, (80, 150, 80), prev_btn, 1, border_radius=8)
-                pb_lbl = fonts["med"].render("◄ Back", True, (150, 220, 150))
+                pb_lbl = fonts["med"].render("< Back", True, (150, 220, 150))
                 screen.blit(pb_lbl, (prev_btn.centerx - pb_lbl.get_width() // 2,
                                      prev_btn.centery - pb_lbl.get_height() // 2))
 
             if tutorial_page == 0:
-                btn_label = "Next ►"
+                btn_label = "Next >"
                 btn_col   = CYAN
             elif show_help:
                 btn_label = "Close X"
                 btn_col   = (255, 180, 80)
             else:
-                btn_label = "Play!  ►"
+                btn_label = "Play!  >"
                 btn_col   = GREEN
             pygame.draw.rect(screen, lerp_color(PANEL, btn_col, 0.25),
                              next_btn, border_radius=8)
@@ -8596,7 +8646,7 @@ def username_screen(screen, clock, fonts):
                                   next_btn.centery - nb_lbl.get_height() // 2))
 
             hint_t = fonts["tiny"].render(
-                "◄/► or A/D to navigate  |  ESC to close", True, GRAY)
+                "</> or A/D to navigate  |  ESC to close", True, GRAY)
             screen.blit(hint_t, (TX + TW // 2 - hint_t.get_width() // 2, TY + TH - 16))
 
         # ── Top strip — only shown when an update is waiting ────────────────────
@@ -8693,7 +8743,7 @@ class Game:
         self._window          = window
         self._apply_display   = apply_display_fn
         self._overlay = pygame.Surface((SW, SH), pygame.SRCALPHA)
-        pygame.display.set_caption("Dungeon Crawler 45.0b16")
+        pygame.display.set_caption("Dungeon Crawler 45.0b21")
         self.clock    = pygame.time.Clock()
         self.world_w  = 3000; self.world_h = 3000
         self.username = username
@@ -9815,7 +9865,8 @@ class Game:
             # Red outline around HP bar
             pygame.draw.rect(self.screen, (200, 30, 30), (8, 40, 234, 20), 2, border_radius=4)
         draw_bar(self.screen, 10, 42, 230, 16, p.hp, p.max_hp, (50, 220, 80))
-        self.screen.blit(self.fonts["small"].render(f"HP {p.hp}/{p.max_hp}", True, WHITE), (12, 44))
+        _hp_lbl = self.fonts["small"].render(f"HP {p.hp}/{p.max_hp}", True, WHITE)
+        self.screen.blit(_hp_lbl, (12, 42 + 8 - _hp_lbl.get_height() // 2))
         # Hardcore indicator: flaming skulls on each side of the HP bar
         if self.hardcore:
             _ht = pygame.time.get_ticks() // 16
@@ -9824,10 +9875,12 @@ class Game:
             draw_flaming_skull(self.screen, 238, skull_cy, _ht + 15, size=7)
         if p.level >= p.LEVEL_CAP:
             draw_bar(self.screen, 10, 66, 230, 12, 1, 1, BLUE)
-            self.screen.blit(self.fonts["tiny"].render("XP  MAX LEVEL", True, (180, 180, 255)), (12, 68))
+            _xp_lbl = self.fonts["tiny"].render("XP  MAX LEVEL", True, (180, 180, 255))
+            self.screen.blit(_xp_lbl, (12, 66 + 6 - _xp_lbl.get_height() // 2))
         else:
             draw_bar(self.screen, 10, 66, 230, 12, p.xp, p.xp_to_next, BLUE)
-            self.screen.blit(self.fonts["tiny"].render(f"XP {p.xp}/{p.xp_to_next}", True, (180, 180, 255)), (12, 68))
+            _xp_lbl2 = self.fonts["tiny"].render(f"XP {p.xp}/{p.xp_to_next}", True, (180, 180, 255))
+            self.screen.blit(_xp_lbl2, (12, 66 + 6 - _xp_lbl2.get_height() // 2))
         # Gold and tokens on same line, weapon name below
         self.screen.blit(self.fonts["med"].render(f"Gold: {p.gold}", True, YELLOW), (12, 86))
         # Token coin icon + count, right-aligned on same line as gold
@@ -11320,9 +11373,9 @@ class Game:
                     perk_col  = (100, 220, 140)
                     ach_col2  = (180, 120, 255)
                     next_wave = self.wave + 1 if not self.wave_active else self.wave
-                    boss_label = "▸ Skip to Boss ◂" if self.dev_boss_expand else "▸ Skip to Boss Wave"
-                    perk_label = "◂ Give Perk ▸"    if self.dev_perk_expand else "▸ Give Perk"
-                    ach_label  = "Achievements ◂"   if self.dev_ach_expand  else "▸ Grant Achievement"
+                    boss_label = ">> Skip to Boss <<" if self.dev_boss_expand else ">> Skip to Boss Wave"
+                    perk_label = "<< Give Perk >>"    if self.dev_perk_expand else ">> Give Perk"
+                    ach_label  = "Achievements <<"     if self.dev_ach_expand  else ">> Grant Achievement"
                     for row, (label, val_str, col) in enumerate([
                         ("+100 Gold",   f"Current: {self.player.gold}g",     YELLOW),
                         ("+1 Level",    f"Current: Lvl {self.player.level}", CYAN),
@@ -11374,7 +11427,7 @@ class Game:
                             self.screen.blit(pn, (pb.x + 8, pb.centery - pn.get_height() // 2))
                             cur_val = self.player.perks.get(pd["key"], 0)
                             if cur_val > 0:
-                                sv = self.fonts["tiny"].render(f"×{round(cur_val/pd['bonus'])}", True, GRAY)
+                                sv = self.fonts["tiny"].render(f"x{round(cur_val/pd['bonus'])}", True, GRAY)
                                 self.screen.blit(sv, (pb.right - sv.get_width() - 8,
                                                        pb.centery - sv.get_height() // 2))
 
@@ -11474,7 +11527,7 @@ def apply_display_mode(current_window):
 
 if __name__ == "__main__":
     _window = apply_display_mode(None)
-    pygame.display.set_caption("Dungeon Crawler 45.0b16")
+    pygame.display.set_caption("Dungeon Crawler 45.0b21")
 
     # Window icon
     _icon_path = asset("icon.png")
