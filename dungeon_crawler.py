@@ -665,7 +665,7 @@ GREEN  = (50, 200, 80);  BLUE   = (50, 120, 220); YELLOW = (255, 215, 0)
 ORANGE = (255, 140, 0);  PURPLE = (160, 50, 200); CYAN   = (0, 200, 220)
 GRAY   = (100, 100, 110); DARK  = (18, 18, 28);   PANEL  = (28, 28, 42)
 WAVE_BREAK_SECS = 10
-GAME_VERSION    = "45.0b21"
+GAME_VERSION    = "45.0b23"
 
 # ── Achievement definitions ──────────────────────────────────────────────────
 # cat: "bosses"|"levels"|"waves"|"kills"|"cosmetics"|"weapons"|"hardcore"|"meta"
@@ -981,20 +981,25 @@ def _fetch_latest_release():
     print(f"[VersionCheck] Starting check — current version: {GAME_VERSION}")
     print(f"[VersionCheck] Fetching: {_GH_API_URL}")
     try:
-        import ssl as _ssl
-        # macOS ships Python without system CA certs; build a context that works
-        # Try certifi first (installed via pip), then fall back to unverified.
+        import ssl as _ssl, sys as _sys
+        _ctx = None
+
+        # macOS ships Python without trusted CA certs in the standard bundle.
+        # Always try certifi first; only fall back to the system bundle on
+        # non-macOS platforms where it reliably works.
         try:
             import certifi as _certifi
             _ctx = _ssl.create_default_context(cafile=_certifi.where())
             print("[VersionCheck] SSL: using certifi CA bundle")
         except ImportError:
-            try:
+            if _sys.platform == "darwin":
+                # macOS without certifi — use unverified rather than silently fail
+                _ctx = _ssl._create_unverified_context()
+                print("[VersionCheck] SSL: macOS — certifi not found, using unverified context. "
+                      "Run 'pip install certifi' to fix.")
+            else:
                 _ctx = _ssl.create_default_context()
                 print("[VersionCheck] SSL: using system CA bundle")
-            except Exception:
-                _ctx = _ssl._create_unverified_context()
-                print("[VersionCheck] SSL: WARNING — unverified context (no CA bundle found)")
 
         req = urllib.request.Request(
             _GH_API_URL,
@@ -1088,6 +1093,8 @@ PATCH_NOTES = [
             #("changed",   "Enemy count reduced/increased in waves, depending on what wave you are at."),
             #("changed",   "Weapon level unlock requrement reduced by 1 for most weapons."),
             #("changed",   "XP curve decreased: levelling is slower now."),
+            #("changed",   "Old text in the profile screen adjusted."),
+            #("changed",   "Font compatibility has been changed, now every version of the game has the same font order."),
         ],
     },
     {
@@ -6689,26 +6696,33 @@ def profile_creation_screen(screen, clock, fonts):
     def _pick_image():
         import sys as _sys
         if _sys.platform == "darwin":
-            # On macOS, tkinter conflicts with SDL's AppKit ownership and causes
-            # NSInvalidArgumentException. Use osascript (AppleScript) instead —
-            # it runs in its own process and never touches the SDL run loop.
+            # On macOS, tkinter conflicts with SDL's AppKit run loop and causes
+            # NSInvalidArgumentException. Use osascript instead — it spawns a
+            # completely separate process that doesn't touch SDL at all.
+            # IMPORTANT: no timeout — the dialog waits for the user.
             try:
                 import subprocess as _sp
+                # Use StandardAdditions directly (simpler and more reliable
+                # than routing through System Events)
                 script = (
-                    'tell application "System Events"\n'
-                    '  set f to choose file with prompt "Choose a profile picture:" '
-                    'of type {"public.image"}\n'
-                    '  return POSIX path of f\n'
-                    'end tell'
+                    'set f to choose file with prompt "Choose a profile picture:" '
+                    'of type {"public.image", "com.compuserve.gif", '
+                    '"public.jpeg", "public.png", "com.microsoft.bmp"}\n'
+                    'return POSIX path of f'
                 )
                 result = _sp.run(
                     ["osascript", "-e", script],
-                    capture_output=True, text=True, timeout=60
+                    capture_output=True, text=True
+                    # No timeout — dialog waits indefinitely for the user
                 )
+                if result.returncode != 0:
+                    # User cancelled (exit code 1) or other error
+                    print(f"[ImagePicker] osascript exited {result.returncode}: {result.stderr.strip()}")
+                    return ""
                 path = result.stdout.strip()
                 return path if path and os.path.isfile(path) else ""
             except Exception as e:
-                print(f"[ImagePicker] osascript failed: {e}")
+                print(f"[ImagePicker] osascript error: {e}")
                 return ""
         else:
             # Windows / Linux: tkinter file dialog is safe here
@@ -6782,7 +6796,7 @@ def profile_creation_screen(screen, clock, fonts):
         t = fonts["huge"].render("Create Your Profile", True, (140, 80, 255))
         screen.blit(t, (SW // 2 - t.get_width() // 2, 80))
         sub = fonts["small"].render(
-            "This profile is global — separate from your in-game username.", True, GRAY)
+            "Enter your profile name and select an image!", True, GRAY)
         screen.blit(sub, (SW // 2 - sub.get_width() // 2, 140))
 
         # Avatar box
@@ -7308,7 +7322,22 @@ def username_screen(screen, clock, fonts):
                     rename_buf  = PROFILE.username
                 # ── Main menu buttons — only active when no sub-panel open ─
                 elif mode == "main":
-                    if btn_new_game.collidepoint(px, py):
+                    # Check extras dropdown FIRST — its items overlap the main button column
+                    if show_extras:
+                        if lb_rect.collidepoint(px, py):
+                            show_lb = True; show_extras = False
+                        elif pn_rect.collidepoint(px, py):
+                            show_patchnotes = True; show_extras = False
+                        elif help_rect.collidepoint(px, py):
+                            show_tutorial = True; show_help = True
+                            tutorial_page = 0; show_extras = False
+                        elif ach_rect.collidepoint(px, py):
+                            show_achievements = True; show_extras = False
+                        elif btn_extras.collidepoint(px, py):
+                            show_extras = False
+                        else:
+                            show_extras = False
+                    elif btn_new_game.collidepoint(px, py):
                         difficulty = "normal"
                         mode = "difficulty"
                         show_extras = False
@@ -7330,18 +7359,6 @@ def username_screen(screen, clock, fonts):
                         show_extras = False
                     elif btn_extras.collidepoint(px, py):
                         show_extras = not show_extras
-                    elif show_extras:
-                        if lb_rect.collidepoint(px, py):
-                            show_lb = True; show_extras = False
-                        elif pn_rect.collidepoint(px, py):
-                            show_patchnotes = True; show_extras = False
-                        elif help_rect.collidepoint(px, py):
-                            show_tutorial = True; show_help = True
-                            tutorial_page = 0; show_extras = False
-                        elif ach_rect.collidepoint(px, py):
-                            show_achievements = True; show_extras = False
-                        else:
-                            show_extras = False
                 # ── Difficulty picker ──────────────────────────────────────
                 elif mode == "difficulty":
                     if diff_normal_rect.collidepoint(px, py):
@@ -8743,7 +8760,7 @@ class Game:
         self._window          = window
         self._apply_display   = apply_display_fn
         self._overlay = pygame.Surface((SW, SH), pygame.SRCALPHA)
-        pygame.display.set_caption("Dungeon Crawler 45.0b21")
+        pygame.display.set_caption("Dungeon Crawler 45.0b23")
         self.clock    = pygame.time.Clock()
         self.world_w  = 3000; self.world_h = 3000
         self.username = username
@@ -11527,7 +11544,7 @@ def apply_display_mode(current_window):
 
 if __name__ == "__main__":
     _window = apply_display_mode(None)
-    pygame.display.set_caption("Dungeon Crawler 45.0b21")
+    pygame.display.set_caption("Dungeon Crawler 45.0b23")
 
     # Window icon
     _icon_path = asset("icon.png")
