@@ -665,7 +665,7 @@ GREEN  = (50, 200, 80);  BLUE   = (50, 120, 220); YELLOW = (255, 215, 0)
 ORANGE = (255, 140, 0);  PURPLE = (160, 50, 200); CYAN   = (0, 200, 220)
 GRAY   = (100, 100, 110); DARK  = (18, 18, 28);   PANEL  = (28, 28, 42)
 WAVE_BREAK_SECS = 10
-GAME_VERSION    = "45.0b23"
+GAME_VERSION    = "45.1b2"
 
 # ── Achievement definitions ──────────────────────────────────────────────────
 # cat: "bosses"|"levels"|"waves"|"kills"|"cosmetics"|"weapons"|"hardcore"|"meta"
@@ -685,7 +685,7 @@ ACHIEVEMENTS = [
     {"id":"level_75", "name":"Dungeon Legend",   "desc":"Reach level 75",                        "cat":"levels","tokens":3},
     {"id":"level_85", "name":"Apex Predator",    "desc":"Reach level 85",                        "cat":"levels","tokens":3},
     {"id":"level_95", "name":"Near Untouchable", "desc":"Reach level 95",                        "cat":"levels","tokens":4},
-    {"id":"level_99", "name":"Maximum Power",    "desc":"Reach the maximum level — 99",          "cat":"levels","tokens":5},
+    {"id":"level_99", "name":"Maximum Power",    "desc":"Reach the maximum level 99",          "cat":"levels","tokens":5},
     # Wave milestones (cleared on boss wave)
     {"id":"wave_10",  "name":"First Reckoning",   "desc":"Clear wave 10",   "cat":"waves","tokens":1},
     {"id":"wave_20",  "name":"Relentless",         "desc":"Clear wave 20",   "cat":"waves","tokens":1},
@@ -703,7 +703,7 @@ ACHIEVEMENTS = [
     {"id":"kills_5000",   "name":"Mass Executioner",  "desc":"Kill 5,000 enemies total",     "cat":"kills","tokens":2},
     {"id":"kills_10000",  "name":"Serial Slayer",     "desc":"Kill 10,000 enemies total",    "cat":"kills","tokens":2},
     {"id":"kills_50000",  "name":"Unstoppable Force", "desc":"Kill 50,000 enemies total",    "cat":"kills","tokens":3},
-    {"id":"kills_100000", "name":"Slayer Master",     "desc":"Kill 100,000 enemies — true mastery","cat":"kills","tokens":5},
+    {"id":"kills_100000", "name":"Slayer Master",     "desc":"Kill 100,000 enemies total","cat":"kills","tokens":5},
     # Cosmetics
     {"id":"cosm_wings",     "name":"Wings of the Fallen","desc":"Unlock the Seraph Wings cosmetic",  "cat":"cosmetics","tokens":2},
     {"id":"cosm_blackhole", "name":"Event Horizon",      "desc":"Unlock the Black Hole cosmetic",    "cat":"cosmetics","tokens":2},
@@ -738,7 +738,7 @@ ACHIEVEMENTS = [
     {"id":"hc_survivor",     "name":"Hardcore Survivor",      "desc":"Complete any Hardcore wave","cat":"hardcore","tokens":3},
     # Meta
     {"id":"all_achievements","name":"True Legend",
-     "desc":"Unlock every achievement including all Hardcore ones — grants the True Legend cosmetic",
+     "desc":"Unlock every achievement!",
      "cat":"meta","tokens":0},
 ]
 ACHIEVEMENT_IDS = {a["id"] for a in ACHIEVEMENTS}
@@ -1080,6 +1080,15 @@ threading.Thread(target=_fetch_latest_release, daemon=True).start()
 # Categories: "added", "changed", "fixed", "removed", "note"
 PATCH_NOTES = [
     {
+        "version": "45.1",
+        "date":    "10-04-2026",
+        "changes": [
+            ("fixed",   "Dying to a boss in hardcore mode getting the player stuck in a kill loop."),
+            ("fixed",   "Boss projectiles and movement as well as player movement and projectiles not pausing during enraged mode animation."),
+            ("changed",   "Rare case items can be sold for 5 tokens instead of 4 now."),
+        ],
+    },
+    {
         "version": "45.0",
         "date":    "10-04-2026",
         "changes": [
@@ -1090,25 +1099,6 @@ PATCH_NOTES = [
             ("changed",   "Bosses now give 3 tokens per kill and the boss related achievements give 2 tokens for each, and 5 for the all in one run achievement."),
             ("changed",   "Enemies now scale by wave instead of player level."),
             ("note",   "More patch notes can be found on the GitHub page!"),
-            #("changed",   "Enemy count reduced/increased in waves, depending on what wave you are at."),
-            #("changed",   "Weapon level unlock requrement reduced by 1 for most weapons."),
-            #("changed",   "XP curve decreased: levelling is slower now."),
-            #("changed",   "Old text in the profile screen adjusted."),
-            #("changed",   "Font compatibility has been changed, now every version of the game has the same font order."),
-        ],
-    },
-    {
-        "version": "44.0",
-        "date":    "26-03-2026",
-        "changes": [
-            ("added",   "New Hardcore mode, this will delete your save upon death and no HP drops will spawn from enemies."),
-            ("added",   "Difficulty options now selectable after picking username."),
-            ("added",   "Two different leaderboards, one for normal mode and one for hardcore mode."),
-            ("added",   "Checkpoint functionality, the game saves after every wave, and just before a new wave starts, and is loadable from 'Load Game' in the main menu."),
-            ("added",   "Volume equaliser to help control any volume spikes in different songs."),            
-            ("changed",   "Main Menu has been reworked, buttons are now in a more organised location."),
-            ("fixed",   "Settings menu during a paused game not working."),
-            ("fixed",   "Hardcore mode visuals not appearing as intended."),
         ],
     },
 ]
@@ -1313,11 +1303,11 @@ def roll_case():
 
 def rarity_sell_price(rarity_name):
     """Return token sell value based on rarity name."""
-    return {"Common": 1, "Uncommon": 2, "Rare": 4, "Epic": 10, "Legendary": 25}.get(rarity_name, 1)
+    return {"Common": 1, "Uncommon": 2, "Rare": 5, "Epic": 10, "Legendary": 25}.get(rarity_name, 1)
 
 # Add, remove, or edit tips freely — they cycle one at a time.
 MENU_TIPS = [
-    "Bosses drop 1 Token when defeated — spend them in the Token Shop!",
+    "Bosses drop 1 Token when defeated - spend them in the Shops!",
     "If you are struggling, try to get the enemy's health below 0 before your health reaches 0, works every time!",
     "Complete multiple Corruption Waves to unlock Corrupted weapons!",
     "Corrupted enemies drop more gold and XP than regular ones, but are also more difficult.",
@@ -1325,6 +1315,8 @@ MENU_TIPS = [
     "Avoid staying in one spot for too long, enemies will try to corner you at any chance!",
     "Gorvak Ironhide summons minions, watch your step :)",
     "If the Nail Gun is not doing it anymore, the Weapon Shop sells additional weapons.",
+    "Sometimes, you might find a case after completing a wave. Open these for fun cosmetics!",
+    "Lifesteal may be a helpful perk if you keep losing your health too fast.",
 ]
 
 # ── Credits ───────────────────────────────────────────────────────────────────
@@ -8760,7 +8752,7 @@ class Game:
         self._window          = window
         self._apply_display   = apply_display_fn
         self._overlay = pygame.Surface((SW, SH), pygame.SRCALPHA)
-        pygame.display.set_caption("Dungeon Crawler 45.0b23")
+        pygame.display.set_caption("Dungeon Crawler 45.1b2")
         self.clock    = pygame.time.Clock()
         self.world_w  = 3000; self.world_h = 3000
         self.username = username
@@ -10402,6 +10394,7 @@ class Game:
                 self.draw_case_toast()
                 _scaled_flip(self.screen)
                 if self.death_anim_timer == 0:
+                    self.game_over = True   # set FIRST — prevents re-triggering death
                     active_lb = self.leaderboard_hc if self.hardcore else self.leaderboard
                     self.lb_rank = active_lb.submit(
                         self.player.username, self.wave, self.player.level,
@@ -10444,8 +10437,10 @@ class Game:
 
                 self.player._enemies_ref = self.enemies
                 self.player._boss_ref    = [b for b in [self.boss, self.boss_clone] if b and b.alive]
-                self.player.update(keys, mx, my, cam, self.projectiles,
-                                   (self.world_w, self.world_h))
+                _enrage_freeze = bool(self.enrage_anim and self.enrage_anim.active)
+                if not _enrage_freeze:
+                    self.player.update(keys, mx, my, cam, self.projectiles,
+                                       (self.world_w, self.world_h))
 
                 # ── Wave logic ────────────────────────────────────────────────
                 alive_count = sum(1 for e in self.enemies if e.alive)
@@ -10531,17 +10526,18 @@ class Game:
 
                 # ── Enemy update ───────────────────────────────────────────────
                 new_splinters = []
-                for e in self.enemies:
-                    drop_orb_before = e.drop_orb
-                    e.update(self.player, self.projectiles, (self.world_w, self.world_h))
-                    # Dragon dropped a fire orb this tick
-                    if e.drop_orb and not drop_orb_before:
-                        orb_count = 3 if (e.elite and e.behaviour == "dragon") else 1
-                        for _ in range(orb_count):
-                            ox = random.uniform(-20, 20) if orb_count > 1 else 0
-                            oy = random.uniform(-20, 20) if orb_count > 1 else 0
-                            self.fire_orbs.append(FireOrb(e.x + ox, e.y + oy, max(1, e.dmg // 3)))
-                        e.drop_orb = False
+                if not _enrage_freeze:
+                    for e in self.enemies:
+                        drop_orb_before = e.drop_orb
+                        e.update(self.player, self.projectiles, (self.world_w, self.world_h))
+                        # Dragon dropped a fire orb this tick
+                        if e.drop_orb and not drop_orb_before:
+                            orb_count = 3 if (e.elite and e.behaviour == "dragon") else 1
+                            for _ in range(orb_count):
+                                ox = random.uniform(-20, 20) if orb_count > 1 else 0
+                                oy = random.uniform(-20, 20) if orb_count > 1 else 0
+                                self.fire_orbs.append(FireOrb(e.x + ox, e.y + oy, max(1, e.dmg // 3)))
+                            e.drop_orb = False
 
                 # ── Boss update ────────────────────────────────────────────────
                 if self.boss and self.boss.alive and not (self.boss_intro and self.boss_intro.active) \
@@ -10578,7 +10574,7 @@ class Game:
                                          "Vexara SPLITS!", (255, 80, 220), 26))
 
                 # ── Vexara clone update ────────────────────────────────────────
-                if self.boss_clone and self.boss_clone.alive:
+                if self.boss_clone and self.boss_clone.alive and not _enrage_freeze:
                     self.boss_clone.update(self.player, self.projectiles,
                                            (self.world_w, self.world_h))
                 elif self.boss_clone and not self.boss_clone.alive:
@@ -10622,7 +10618,8 @@ class Game:
 
                 # ── Projectiles ────────────────────────────────────────────────
                 for proj in self.projectiles[:]:
-                    proj.update()
+                    if not _enrage_freeze:
+                        proj.update()
                     if not proj.alive:
                         self.projectiles.remove(proj); continue
 
@@ -10781,6 +10778,8 @@ class Game:
                     if ft.life <= 0: self.floating_texts.remove(ft)
 
                 if self.player.hp <= 0 and self.death_anim_timer == 0 and not self.game_over:
+                    self.player.hp = 0          # clamp — prevents double-trigger from further damage
+                    self.player.iframes = 999999  # permanent iframes — boss can't re-kill during anim
                     self.death_anim_timer = 120   # 2 seconds at 60fps
                     SOUNDS.play("player_hit", volume_scale=1.0)
                     # Spawn outward explosion particles — bolts in all directions
@@ -11544,7 +11543,7 @@ def apply_display_mode(current_window):
 
 if __name__ == "__main__":
     _window = apply_display_mode(None)
-    pygame.display.set_caption("Dungeon Crawler 45.0b23")
+    pygame.display.set_caption("Dungeon Crawler 45.1b2")
 
     # Window icon
     _icon_path = asset("icon.png")
