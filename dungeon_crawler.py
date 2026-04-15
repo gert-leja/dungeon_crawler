@@ -112,15 +112,15 @@ class Music:
     # 1.0 = full user volume; 0.7 = 30% quieter than full; etc.
     # Raise a value if a track is too quiet, lower it if too loud.
     TRACK_GAIN = {
-        "menu":             0.85,
-        "shop":             0.80,
-        "battle":           0.90,
-        "corruption_wave":  0.85,
-        "boss_malachar":    0.85,
-        "boss_vexara":      0.85,
-        "boss_gorvak":      0.85,
-        "boss_seraphix":    0.85,
-        "boss_nyxoth":      0.85,
+        "menu":             0.55,
+        "shop":             0.52,
+        "battle":           0.58,
+        "corruption_wave":  0.55,
+        "boss_malachar":    0.55,
+        "boss_vexara":      0.55,
+        "boss_gorvak":      0.55,
+        "boss_seraphix":    0.55,
+        "boss_nyxoth":      0.55,
     }
 
     def __init__(self):
@@ -665,7 +665,7 @@ GREEN  = (50, 200, 80);  BLUE   = (50, 120, 220); YELLOW = (255, 215, 0)
 ORANGE = (255, 140, 0);  PURPLE = (160, 50, 200); CYAN   = (0, 200, 220)
 GRAY   = (100, 100, 110); DARK  = (18, 18, 28);   PANEL  = (28, 28, 42)
 WAVE_BREAK_SECS = 10
-GAME_VERSION    = "45.1b2"
+GAME_VERSION    = "45.2b3"
 
 # ── Achievement definitions ──────────────────────────────────────────────────
 # cat: "bosses"|"levels"|"waves"|"kills"|"cosmetics"|"weapons"|"hardcore"|"meta"
@@ -816,6 +816,14 @@ class Profile:
                 live_game = getattr(__main__, "_live_game", None)
                 if live_game and hasattr(live_game, "player"):
                     live_game.player.owned_cosmetics.add(cosm["id"])
+        # Grant any titles tied to this achievement
+        import __main__
+        live_game_t = getattr(__main__, "_live_game", None)
+        for tit in TITLES:
+            if tit.get("achievement_unlock") == ach_id:
+                TOKENS.unlock_title(tit["id"])
+                if live_game_t and hasattr(live_game_t, "player"):
+                    live_game_t.player.owned_titles.add(tit["id"])
         self.save()
         return True
 
@@ -974,7 +982,7 @@ class Profile:
 PROFILE = Profile()
 
 # ── Online version check ──────────────────────────────────────────────────────
-_GH_API_URL  = "https://api.github.com/repos/gert-leja/dungeon_crawler/releases"
+_GH_API_URL  = ""#"https://api.github.com/repos/gert-leja/dungeon_crawler/releases"
 _update_info = {}   # filled by background thread: {"version", "url", "notes"}
 
 def _fetch_latest_release():
@@ -1080,25 +1088,22 @@ threading.Thread(target=_fetch_latest_release, daemon=True).start()
 # Categories: "added", "changed", "fixed", "removed", "note"
 PATCH_NOTES = [
     {
+        "version": "45.2",
+        "date":    "10-04-2026",
+        "changes": [
+            ("added",   "Achievements that grant titles with new cool visuals on some titles."),
+            ("changed",   "Some titles that used to be purchaseable are locked behind achievements now."),
+            ("changed",   "Music volume lowered from 0.85x to 0.65x."),
+        ],
+    },
+    {
         "version": "45.1",
         "date":    "10-04-2026",
         "changes": [
             ("fixed",   "Dying to a boss in hardcore mode getting the player stuck in a kill loop."),
             ("fixed",   "Boss projectiles and movement as well as player movement and projectiles not pausing during enraged mode animation."),
             ("changed",   "Rare case items can be sold for 5 tokens instead of 4 now."),
-        ],
-    },
-    {
-        "version": "45.0",
-        "date":    "10-04-2026",
-        "changes": [
-            ("added",   "Achievements system: tracks achievements for player, rewarding you with tokens or cool cosmetics!"),
-            ("added",   "Global account system, with an account level: achievements contribute to account level and instead of username, the account name is now used."),
-            ("added",   "Cases! Gambling is now available, every wave you have a 10% chance of getting a case, or 50% if you're fighting a boss wave, open these with tokens to unlock new cosmetics!"),
-            ("added",   "Inventory now exists! inventory can hold cases and cosmetics that have been unlocked from those cases, which can also be sold for tokens."),
-            ("changed",   "Bosses now give 3 tokens per kill and the boss related achievements give 2 tokens for each, and 5 for the all in one run achievement."),
-            ("changed",   "Enemies now scale by wave instead of player level."),
-            ("note",   "More patch notes can be found on the GitHub page!"),
+            ("changed",   "Golden Obliterator weapon visuals and function have been reworked."),
         ],
     },
 ]
@@ -1213,21 +1218,35 @@ COSMETICS = [
 ]
 
 # ── Title definitions ─────────────────────────────────────────────────────────
+# achievement_unlock: title is granted automatically when the named achievement
+#                     is unlocked — it cannot be purchased with tokens.
 TITLES = [
-    {"id": "none",           "name": "(No Title)",         "desc": "Bare name, no title",              "cost": 0,  "col": (150, 150, 150)},
-    {"id": "adventurer",     "name": "Adventurer",     "desc": "A classic warrior's title",        "cost": 2,  "col": (100, 200, 255)},
-    {"id": "dungeon_walker", "name": "Dungeon Crawler", "desc": "You know these halls well",        "cost": 3,  "col": (140, 200, 140)},
-    {"id": "boss_slayer",    "name": "Boss Slayer",        "desc": "Bosses fear your name",            "cost": 5,  "col": (255, 140, 60)},
-    {"id": "undying",        "name": "Undying",        "desc": "Death has tried and failed",       "cost": 6,  "col": (220, 80,  80)},
-    {"id": "shadow",         "name": "Quiet Shadow","desc": "Unseen until it's too late",     "cost": 6,  "col": (120, 80,  200)},
-    {"id": "gilded",         "name": "Royalty",         "desc": "Wealth beyond measure",            "cost": 7,  "col": (255, 215, 0)},
-    {"id": "void_touched",   "name": "Void-Touched",       "desc": "Marked by the abyss",              "cost": 8,  "col": (160, 40,  255)},
-    {"id": "warlord",        "name": "Warlord",            "desc": "Armies answer your call",          "cost": 10, "col": (255, 80,  80)},
-    {"id": "storm_caller",   "name": "Storm Caller",       "desc": "Lightning bends to your will",    "cost": 10, "col": (140, 200, 255)},
-    {"id": "ironclad",       "name": "Ironclad",       "desc": "Unbreakable, unbeatable",          "cost": 12, "col": (160, 180, 200)},
-    {"id": "legend",         "name": "Legend",             "desc": "Few have reached this status",    "cost": 15, "col": (255, 215, 0)},
-    {"id": "champion",       "name": "Eternal Champion","desc": "Master of the dungeon",           "cost": 18, "col": (80,  220, 255)},
-    {"id": "harbinger",      "name": "Hand of Death",  "desc": "The end comes with you",           "cost": 20, "col": (220, 60,  60)},
+    {"id": "none",            "name": "(No Title)",       "desc": "Bare name, no title",                      "cost": 0,  "col": (150, 150, 150)},
+    # ── Achievement-unlocked titles ───────────────────────────────────────────
+    {"id": "adventurer",      "name": "Adventurer",       "desc": "Reach level 10",                           "cost": 0,  "col": (100, 200, 255), "achievement_unlock": "level_10"},
+    {"id": "boss_slayer",     "name": "Boss Slayer",      "desc": "Defeat all 5 bosses in one run",           "cost": 0,  "col": (255, 140, 60),  "achievement_unlock": "kill_all_bosses"},
+    {"id": "gilded",          "name": "Gilded",           "desc": "Collect 50,000 gold total",                "cost": 0,  "col": (255, 215, 0),   "achievement_unlock": "gold_50000"},
+    {"id": "true_legend",     "name": "True Legend",      "desc": "Unlock every achievement",                 "cost": 0,  "col": (255, 80, 200),  "achievement_unlock": "all_achievements"},
+    {"id": "undying",         "name": "Undying",          "desc": "Clear wave 50 in Hardcore",                "cost": 0,  "col": (220, 80,  80),  "achievement_unlock": "hc_wave_50"},
+    {"id": "fashion_expert",  "name": "Fashion Expert",   "desc": "Unlock every cosmetic",                    "cost": 0,  "col": (255, 140, 255), "achievement_unlock": "cosm_all"},
+    {"id": "seasoned_warrior","name": "Seasoned Warrior", "desc": "Reach level 25",                           "cost": 0,  "col": (180, 220, 120), "achievement_unlock": "level_25"},
+    {"id": "expert",          "name": "Expert",           "desc": "Reach level 50",                           "cost": 0,  "col": (80, 200, 255),  "achievement_unlock": "level_50"},
+    {"id": "godlike",         "name": "Godlike",          "desc": "Reach level 85",                           "cost": 0,  "col": (220, 120, 255), "achievement_unlock": "level_85"},
+    {"id": "legend",          "name": "Legend",           "desc": "Reach level 99",                           "cost": 0,  "col": (255, 215, 0),   "achievement_unlock": "level_99"},
+    {"id": "novice",          "name": "Novice",           "desc": "Clear wave 10",                            "cost": 0,  "col": (140, 200, 140), "achievement_unlock": "wave_10"},
+    {"id": "intermediate",    "name": "Intermediate",     "desc": "Clear wave 30",                            "cost": 0,  "col": (100, 180, 255), "achievement_unlock": "wave_30"},
+    {"id": "advanced",        "name": "Advanced",         "desc": "Clear wave 50",                            "cost": 0,  "col": (80, 255, 200),  "achievement_unlock": "wave_50"},
+    {"id": "superior",        "name": "Superior",         "desc": "Clear wave 80",                            "cost": 0,  "col": (255, 200, 60),  "achievement_unlock": "wave_80"},
+    {"id": "master",          "name": "Master",           "desc": "Clear wave 100",                           "cost": 0,  "col": (220, 60,  60),  "achievement_unlock": "wave_100"},
+    # ── Purchasable titles ────────────────────────────────────────────────────
+    {"id": "dungeon_walker",  "name": "Dungeon Crawler",  "desc": "You know these halls well",                "cost": 3,  "col": (140, 200, 140)},
+    {"id": "shadow",          "name": "Quiet Shadow",     "desc": "Unseen until it's too late",               "cost": 6,  "col": (120, 80,  200)},
+    {"id": "void_touched",    "name": "Void-Touched",     "desc": "Marked by the abyss",                      "cost": 8,  "col": (160, 40,  255)},
+    {"id": "warlord",         "name": "Warlord",          "desc": "Armies answer your call",                  "cost": 10, "col": (255, 80,  80)},
+    {"id": "storm_caller",    "name": "Storm Caller",     "desc": "Lightning bends to your will",             "cost": 10, "col": (140, 200, 255)},
+    {"id": "ironclad",        "name": "Ironclad",         "desc": "Unbreakable, unbeatable",                  "cost": 12, "col": (160, 180, 200)},
+    {"id": "champion",        "name": "Eternal Champion", "desc": "Master of the dungeon",                    "cost": 18, "col": (80,  220, 255)},
+    {"id": "harbinger",       "name": "Hand of Death",    "desc": "The end comes with you",                   "cost": 20, "col": (220, 60,  60)},
 ]
 
 # ── Case pool ─────────────────────────────────────────────────────────────────
@@ -1448,15 +1467,15 @@ SPECIAL_WEAPONS = [
     {
         "name":      "Golden Obliterator",
         "damage":    130,
-        "speed":     0.50,
+        "speed":     0.70,
         "range":     560,
         "cost":      3500,
         "req_lvl":   25,
         "color":     (255, 220, 0),
-        "proj_size": 13,
-        "behaviour": "penta",
+        "proj_size": 11,
+        "behaviour": "obliterator",
         "fire_interval": 20,
-        "desc":      "Golden destruction and power",
+        "desc":      "3 fast piercing bolts that pulse gold and purple",
         "unlock_type":  "corruption_waves",
         "unlock_value": 10,
         "unlock_hint":  "Clear 10 Corruption Waves to unlock",
@@ -2045,6 +2064,41 @@ class PierceProjectile(Projectile):
         super().__init__(x, y, dx, dy, dmg, spd, rng, col, size, owner="player")
         self.hit_ids = set()   # enemy ids already struck
 
+
+class ObliteratorProjectile(PierceProjectile):
+    """Golden Obliterator projectile — pulses between gold and dark purple
+    while in flight. Pierces like PierceProjectile."""
+    GOLD   = (255, 210, 0)
+    PURPLE = (80,  0,  160)
+
+    def draw(self, surf, cam):
+        sx = int(self.x - cam[0]); sy = int(self.y - cam[1])
+        # Pulse factor based on distance travelled (full cycle every 60 px)
+        pulse = (math.sin(self.dist * 0.105)) * 0.5 + 0.5   # 0..1
+        col   = lerp_color(self.PURPLE, self.GOLD, pulse)
+        # Outer glow
+        gs = self.size + 6
+        gsurf = pygame.Surface((gs * 2, gs * 2), pygame.SRCALPHA)
+        pygame.draw.circle(gsurf, (*col, 70), (gs, gs), gs)
+        surf.blit(gsurf, (sx - gs, sy - gs))
+        # Core orb
+        pygame.draw.circle(surf, col, (sx, sy), self.size)
+        # Bright inner highlight
+        inner = lerp_color(col, (255, 255, 255), 0.5)
+        pygame.draw.circle(surf, inner, (sx, sy), max(2, self.size - 4))
+        # Short velocity trail
+        trail_len = 14
+        _speed = math.hypot(self.vx, self.vy) or 0.001
+        tx = sx - int(self.vx / _speed * trail_len)
+        ty = sy - int(self.vy / _speed * trail_len)
+        trail_col = lerp_color(self.PURPLE, self.GOLD, 1 - pulse)
+        tsurf = pygame.Surface((abs(sx - tx) + 4, abs(sy - ty) + 4), pygame.SRCALPHA)
+        ox = min(sx, tx); oy = min(sy, ty)
+        pygame.draw.line(tsurf, (*trail_col, 130),
+                         (sx - ox, sy - oy), (tx - ox, ty - oy),
+                         max(1, self.size - 4))
+        surf.blit(tsurf, (ox, oy))
+
 # ── FloatingText ──────────────────────────────────────────────────────────────
 
 class FloatingText:
@@ -2251,12 +2305,27 @@ class Player:
                     self.x, self.y, math.cos(a), math.sin(a),
                     dmg, spd, rng, col, sz))
 
+        elif beh == "obliterator":
+            # 3 fast gold/purple piercing bolts — positions 0, 2, 4 of a phantom
+            # 5-shot spread (gaps at slots 1 and 3, like missing bolts)
+            SPREAD = 0.22   # angle between adjacent slots (same as penta: 0.4 / 2)
+            for i in (0, 2, 4):
+                # Base angle for this slot within the phantom 5-shot pattern
+                slot_a = base_a + (-2 * SPREAD + i * SPREAD)
+                # Small random jitter so each shot is slightly unpredictable
+                jitter = random.uniform(-0.04, 0.04)
+                a = slot_a + jitter
+                projectiles.append(ObliteratorProjectile(
+                    self.x, self.y, math.cos(a), math.sin(a),
+                    dmg, spd, rng, (255, 210, 0), sz))
+
         self.shoot_cooldown = max(1, int(
             w["fire_interval"] / (1 + self.perk("fire_rate"))))
         # Per-weapon shoot sound
         _sfx_scale = {
             "rapid":             0.28,
-            "corrupted_homing":  0.55,
+            "corrupted_homing":  0.22,
+            "obliterator":       0.45,
         }.get(beh, 0.5)
         SOUNDS.play(f"shoot_{beh}", volume_scale=_sfx_scale)
 
@@ -3164,16 +3233,119 @@ class Player:
             title_obj = next((t for t in TITLES if t["id"] == self.active_title), None)
 
         if title_obj:
-            title_surf = font_small.render(title_obj["name"], True, title_obj["col"])
-            title_x    = sx - title_surf.get_width() // 2
-            title_y    = name_y - title_surf.get_height() - 2
-            # Background covers both rows
-            total_h  = title_surf.get_height() + 2 + name_surf.get_height() + 2
-            total_w  = max(title_surf.get_width(), name_surf.get_width()) + pad * 2
-            bg_surf  = pygame.Surface((total_w, total_h), pygame.SRCALPHA)
+            tid = title_obj["id"]
+
+            # ── true_legend: rainbow stripe effect on title text ──────────────
+            if tid == "true_legend":
+                base_surf = font_small.render(title_obj["name"], True, WHITE)
+                tw2 = base_surf.get_width(); th2 = base_surf.get_height()
+                rainbow_surf = pygame.Surface((tw2, th2), pygame.SRCALPHA)
+                shift = (t * 3) % 360
+                for col_x in range(tw2):
+                    hue = (shift + col_x * 360 / max(tw2, 1)) % 360
+                    rc  = _hsv_to_rgb(hue, 1.0, 1.0)
+                    col_strip = pygame.Surface((1, th2), pygame.SRCALPHA)
+                    col_strip.fill((*rc, 220))
+                    rainbow_surf.blit(col_strip, (col_x, 0))
+                rainbow_surf.blit(base_surf, (0, 0), special_flags=pygame.BLEND_RGBA_MULT)
+                title_surf = rainbow_surf
+            else:
+                title_surf = font_small.render(title_obj["name"], True, title_obj["col"])
+
+            title_x = sx - title_surf.get_width() // 2
+            title_y = name_y - title_surf.get_height() - 2
+            total_h = title_surf.get_height() + 2 + name_surf.get_height() + 2
+
+            # ── legend: flame "99" visuals on both sides ──────────────────────
+            side_extra = 0
+            if tid == "legend":
+                side_extra = 28
+            elif tid == "master":
+                side_extra = 32
+            elif tid == "undying":
+                side_extra = 20
+
+            total_w = max(title_surf.get_width(), name_surf.get_width()) + pad * 2 + side_extra * 2
+            bg_surf = pygame.Surface((total_w, total_h), pygame.SRCALPHA)
             bg_surf.fill((0, 0, 0, 140))
             surf.blit(bg_surf, (sx - total_w // 2, title_y - 2))
+
+            # ── undying: flaming skull animations on both sides ───────────────
+            if tid == "undying":
+                skull_y = title_y + title_surf.get_height() // 2
+                draw_flaming_skull(surf, sx - title_surf.get_width() // 2 - 14, skull_y, t, size=8)
+                draw_flaming_skull(surf, sx + title_surf.get_width() // 2 + 14, skull_y, t + 10, size=8)
+
+            # ── legend: animated flame "99" on both sides ─────────────────────
+            if tid == "legend":
+                lbl_font = font_small
+                lbl99    = lbl_font.render("99", True, (255, 180, 40))
+                flame_t  = t * 0.08
+                for side in (-1, 1):
+                    base_x = sx + side * (title_surf.get_width() // 2 + side_extra - 2)
+                    base_y = title_y + title_surf.get_height() // 2 - lbl99.get_height() // 2
+                    wave_y = int(math.sin(flame_t * 3 + side) * 2)
+                    # small flame flicker behind the label
+                    for fi in range(3):
+                        fc = _hsv_to_rgb((30 + fi * 20) % 360, 1.0, 1.0)
+                        fs = pygame.Surface((6, 10), pygame.SRCALPHA)
+                        foff_x = random.randint(-1, 1)
+                        pygame.draw.ellipse(fs, (*fc, 120 - fi * 30), (0, 0, 6, 10))
+                        surf.blit(fs, (base_x - 3 + foff_x, base_y - 6 - fi * 3 + wave_y))
+                    lbl_col = _hsv_to_rgb((t * 4) % 360, 1.0, 1.0)
+                    lbl_colored = lbl_font.render("99", True, lbl_col)
+                    surf.blit(lbl_colored, (base_x - lbl99.get_width() // 2, base_y + wave_y))
+
+            # ── master: red particles + flame "100" on both sides ─────────────
+            if tid == "master":
+                lbl_font  = font_small
+                lbl100    = lbl_font.render("100", True, (220, 60, 60))
+                flame_t   = t * 0.09
+                for side in (-1, 1):
+                    base_x = sx + side * (title_surf.get_width() // 2 + side_extra - 4)
+                    base_y = title_y + title_surf.get_height() // 2 - lbl100.get_height() // 2
+                    wave_y = int(math.sin(flame_t * 2.5 + side * 1.2) * 2)
+                    # red particles
+                    for fi in range(4):
+                        fc  = lerp_color((220, 30, 30), (255, 120, 0), fi / 3)
+                        foff_x = random.randint(-2, 2)
+                        fs = pygame.Surface((5, 9), pygame.SRCALPHA)
+                        pygame.draw.ellipse(fs, (*fc, 130 - fi * 25), (0, 0, 5, 9))
+                        surf.blit(fs, (base_x - 3 + foff_x, base_y - 7 - fi * 3 + wave_y))
+                    lbl_col = lerp_color((255, 60, 60), (255, 200, 60),
+                                         (math.sin(t * 0.07) * 0.5 + 0.5))
+                    lbl_c   = lbl_font.render("100", True, lbl_col)
+                    surf.blit(lbl_c, (base_x - lbl100.get_width() // 2, base_y + wave_y))
+
             surf.blit(title_surf, (title_x, title_y))
+
+            # ── advanced: blue particle drift over title text ─────────────────
+            if tid == "advanced":
+                rng_s = random.Random(t // 4)
+                for _ in range(6):
+                    px3 = title_x + rng_s.randint(0, max(1, title_surf.get_width()))
+                    py3 = title_y + rng_s.randint(-4, title_surf.get_height())
+                    pr  = rng_s.randint(1, 3)
+                    pa  = rng_s.randint(100, 210)
+                    # Cycle between the title's cyan-green and a soft blue
+                    hue_p = (t * 2 + rng_s.randint(0, 60)) % 360
+                    pc    = _hsv_to_rgb(hue_p if 140 <= hue_p <= 200 else 168, 0.7, 1.0)
+                    ps    = pygame.Surface((pr * 2 + 2, pr * 2 + 2), pygame.SRCALPHA)
+                    pygame.draw.circle(ps, (*pc, pa), (pr + 1, pr + 1), pr)
+                    surf.blit(ps, (px3 - pr, py3 - pr))
+
+            # ── superior: golden particle drift over title text ───────────────
+            if tid == "superior":
+                rng_s = random.Random(t // 4)
+                for _ in range(5):
+                    px3 = title_x + rng_s.randint(0, max(1, title_surf.get_width()))
+                    py3 = title_y + rng_s.randint(-4, title_surf.get_height())
+                    pr  = rng_s.randint(1, 3)
+                    pa  = rng_s.randint(120, 220)
+                    ps  = pygame.Surface((pr * 2 + 2, pr * 2 + 2), pygame.SRCALPHA)
+                    pygame.draw.circle(ps, (255, 210, 60, pa), (pr + 1, pr + 1), pr)
+                    surf.blit(ps, (px3 - pr, py3 - pr))
+
             surf.blit(name_surf, (name_x, name_y))
         else:
             bg_surf = pygame.Surface(
@@ -5845,6 +6017,7 @@ class Shop:
             tc       = title["col"]
             hov      = rr.collidepoint(pygame.mouse.get_pos())
             sel      = (global_i == self.selected)
+            is_ach   = bool(title.get("achievement_unlock"))
 
             bg = lerp_color(PANEL, tc, 0.28 if (sel or hov) else (0.14 if owned else 0.05))
             pygame.draw.rect(surf, bg, rr, border_radius=10)
@@ -5869,13 +6042,34 @@ class Shop:
             ds = fonts["small"].render(title["desc"], True, desc_col)
             surf.blit(ds, (rr.x + 56, ry + 34))
 
-            # Cost / status
+            # Cost / status (right side)
             if equipped:
                 eq_s = fonts["small"].render("Equipped", True, TIT_COL)
                 surf.blit(eq_s, (rr.right - eq_s.get_width() - 16, ry + 25))
             elif owned:
                 eq_s = fonts["small"].render("Owned", True, (100, 200, 100))
                 surf.blit(eq_s, (rr.right - eq_s.get_width() - 16, ry + 25))
+            elif is_ach:
+                # Find the achievement name
+                ach_id2 = title["achievement_unlock"]
+                ach_obj = next((a for a in ACHIEVEMENTS if a["id"] == ach_id2), None)
+                ach_name = ach_obj["name"] if ach_obj else ach_id2
+                ach_done = ach_id2 in PROFILE.unlocked
+                ach_col2 = (80, 200, 80) if ach_done else (180, 100, 255)
+                lock_s = fonts["tiny"].render("Achievement:", True, ach_col2)
+                surf.blit(lock_s, (rr.right - lock_s.get_width() - 10, ry + 10))
+                # Truncate achievement name if needed
+                max_w = rr.width // 2 - 20
+                an_text = ach_name
+                while fonts["tiny"].size(an_text)[0] > max_w and len(an_text) > 3:
+                    an_text = an_text[:-1]
+                if an_text != ach_name:
+                    an_text += ".."
+                an_s = fonts["tiny"].render(an_text, True, ach_col2)
+                surf.blit(an_s, (rr.right - an_s.get_width() - 10, ry + 26))
+                if ach_done:
+                    unlocked_s = fonts["tiny"].render("✓ Unlocked!", True, (80, 220, 80))
+                    surf.blit(unlocked_s, (rr.right - unlocked_s.get_width() - 10, ry + 44))
             elif title["cost"] == 0:
                 fr_s = fonts["small"].render("Free", True, GREEN)
                 surf.blit(fr_s, (rr.right - fr_s.get_width() - 16, ry + 25))
@@ -5985,12 +6179,13 @@ class Shop:
                 self.selected   = self.title_page * ITEMS_PER; return
             title = items[self.selected]
             owned = title["id"] in player.owned_titles
-            if key == pygame.K_b and not owned and title["cost"] == 0:
+            is_ach_title = bool(title.get("achievement_unlock"))
+            if key == pygame.K_b and not owned and not is_ach_title and title["cost"] == 0:
                 player.owned_titles.add(title["id"])
                 TOKENS.unlock_title(title["id"])
                 floating_texts.append(FloatingText(player.x, player.y - 30,
                                                     f"Unlocked: {title['name']}!", (180, 120, 255), 20))
-            elif key == pygame.K_b and not owned and TOKENS.spend(title["cost"]):
+            elif key == pygame.K_b and not owned and not is_ach_title and TOKENS.spend(title["cost"]):
                 player.owned_titles.add(title["id"])
                 TOKENS.unlock_title(title["id"])
                 floating_texts.append(FloatingText(player.x, player.y - 30,
@@ -6128,13 +6323,15 @@ class Shop:
                     if not title:
                         break
                     owned = title_id in player.owned_titles
-                    if not owned:
+                    is_ach_title = bool(title.get("achievement_unlock"))
+                    if not owned and not is_ach_title:
                         can_buy = (title["cost"] == 0) or TOKENS.spend(title["cost"])
                         if can_buy:
                             player.owned_titles.add(title_id); TOKENS.unlock_title(title_id)
                             floating_texts.append(FloatingText(player.x, player.y - 30,
                                                                f"Unlocked: {title['name']}!", (180, 120, 255), 20))
-                    else:
+                    elif owned:
+                        # Only equip if actually owned — achievement titles can't be equipped otherwise
                         player.active_title = title_id; TOKENS.equip_title(title_id)
                         lbl = "(No Title)" if title_id == "none" else title["name"]
                         floating_texts.append(FloatingText(player.x, player.y - 30,
@@ -8752,7 +8949,7 @@ class Game:
         self._window          = window
         self._apply_display   = apply_display_fn
         self._overlay = pygame.Surface((SW, SH), pygame.SRCALPHA)
-        pygame.display.set_caption("Dungeon Crawler 45.1b2")
+        pygame.display.set_caption("Dungeon Crawler 45.2b3")
         self.clock    = pygame.time.Clock()
         self.world_w  = 3000; self.world_h = 3000
         self.username = username
@@ -10672,7 +10869,7 @@ class Game:
                         is_pierce = isinstance(proj, PierceProjectile)
                         for e in self.enemies:
                             if not e.alive: continue
-                            if is_pierce and hasattr(proj, 'hit_ids') and e.etype in proj.hit_ids: continue
+                            if is_pierce and hasattr(proj, 'hit_ids') and id(e) in proj.hit_ids: continue
                             if math.hypot(proj.x - e.x, proj.y - e.y) < proj.size + e.size:
                                 e.take_damage(proj.dmg)
                                 self.player.lifesteal_acc += self.player.perk("hp_regen"); heal = int(self.player.lifesteal_acc); self.player.lifesteal_acc -= heal; self.player.hp = min(self.player.max_hp, self.player.hp + heal)
@@ -10680,7 +10877,7 @@ class Game:
                                 for _ in range(6):
                                     self.particles.append(Particle(proj.x, proj.y, proj.col))
                                 if is_pierce:
-                                    proj.hit_ids.add(e.etype)   # mark as hit, don't remove proj
+                                    proj.hit_ids.add(id(e))   # mark this instance as hit, don't remove proj
                                 else:
                                     proj.alive = False
                                 if not e.alive:
@@ -11543,7 +11740,7 @@ def apply_display_mode(current_window):
 
 if __name__ == "__main__":
     _window = apply_display_mode(None)
-    pygame.display.set_caption("Dungeon Crawler 45.1b2")
+    pygame.display.set_caption("Dungeon Crawler 45.2b3")
 
     # Window icon
     _icon_path = asset("icon.png")
